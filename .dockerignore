@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.gitignore
+README.md
+.DS_Store
+Thumbs.db
+*.log
+
+# Ignore VSCode settings (nếu có)
+.vscode/
+
