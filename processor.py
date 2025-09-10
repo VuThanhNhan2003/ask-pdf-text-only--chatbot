@@ -1,84 +1,301 @@
 import os
-from PyPDF2 import PdfReader
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain.chains import ConversationalRetrievalChain
+import pymupdf4llm
+from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import PromptTemplate
 from langchain.memory import ConversationBufferMemory
-
-# Load API keys from .env file
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+import uuid
+import re
+from typing import List, Dict, Optional
 from dotenv import load_dotenv
+
 load_dotenv()
 
-class RAGProcessor: # Handles the RAG pipeline processing for multiple PDFs
-    def __init__(self, file_paths):
-        """Initialize the RAG processor with multiple file paths."""
+# Global variables để cache embedding model
+_embedding_model = None
+_embedding_model_path = None
+
+def get_embedding_model():
+    """Get cached embedding model"""
+    global _embedding_model, _embedding_model_path
+    
+    if _embedding_model is None:
+        model_name = "sentence-transformers/all-MiniLM-L6-v2"
+        local_model_path = "models/all-MiniLM-L6-v2"
+        
+        if not os.path.exists(local_model_path):
+            print(f"Downloading model {model_name}...")
+            os.makedirs("models", exist_ok=True)
+            model = SentenceTransformer(model_name)
+            model.save_pretrained(local_model_path)
+            print(f"Model downloaded and saved to {local_model_path}")
+        else:
+            print(f"Loading model from local path: {local_model_path}")
+        
+        _embedding_model = SentenceTransformer(local_model_path, local_files_only=True)
+        _embedding_model_path = local_model_path
+    
+    return _embedding_model
+
+class RAGProcessor:
+    def __init__(self, subject=None):
+        """Initialize the RAG processor for a specific subject."""
         os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
         
-        # Store the file paths (can be a single file or list of files)
-        if isinstance(file_paths, str):
-            self.file_paths = [file_paths]
+        # Use cached embedding model
+        self.embedding_model = get_embedding_model()
+        
+        # Initialize Qdrant client (Docker service)
+        self.qdrant_client = QdrantClient(host="qdrant", port=6333)
+        
+        # Set collection name based on subject
+        if subject is None or subject == "Tất cả môn học":
+            self.collection_name = "all_subjects"
+            self.subject = "Tất cả môn học"
         else:
-            self.file_paths = file_paths
+            # Convert subject name to valid collection name
+            self.collection_name = self._sanitize_collection_name(subject)
+            self.subject = subject
         
-        # Initialize the conversation chain
-        self.conversation_chain = self._process_documents()
-        
-    def _process_documents(self):
-        """Process multiple documents and create the conversation chain."""
-        all_text = ""
-        document_info = []
-        
-        # Read all PDF files
-        for i, file_path in enumerate(self.file_paths):
-            try:
-                with open(file_path, 'rb') as file:
-                    reader = PdfReader(file)
-                    doc_text = ""
-                    for page_num, page in enumerate(reader.pages):
-                        page_text = page.extract_text()
-                        doc_text += page_text
-                    
-                    # Add document identifier to the text
-                    doc_name = os.path.basename(file_path)
-                    doc_text_with_source = f"\n[DOCUMENT: {doc_name}]\n{doc_text}\n[END OF DOCUMENT: {doc_name}]\n"
-                    all_text += doc_text_with_source
-                    
-                    document_info.append({
-                        'name': doc_name,
-                        'path': file_path,
-                        'pages': len(reader.pages)
-                    })
-                    
-                    print(f"Processed {doc_name}: {len(reader.pages)} pages")
-                    
-            except Exception as e:
-                print(f"Error processing {file_path}: {e}")
-                continue
-        
-        if not all_text.strip():
-            raise ValueError("No text could be extracted from the provided PDF files")
-        
-        # Create a more robust text splitter
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1500,  # Increase chunk size to handle larger portions of text
-            chunk_overlap=300,  # Increase overlap for better context retention
-            separators=["\n\n", "\n", " ", ""]
+        # Initialize LLM
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-2.0-flash-exp", 
+            temperature=0.1
         )
         
-        # Split the combined document into chunks
-        chunks = text_splitter.split_text(all_text)
-        print(f"All documents split into {len(chunks)} chunks")
+        # Initialize memory
+        self.memory = ConversationBufferMemory(
+            memory_key="chat_history",
+            return_messages=True
+        )
         
-        # Create embeddings
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        # Initialize text splitter
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""]
+        )
         
-        # Create vector store
-        vector_store = FAISS.from_texts(chunks, embeddings)
+        # Process documents if collection doesn't exist
+        if not self._collection_exists():
+            print(f"Collection '{self.collection_name}' not found. Processing documents...")
+            if self.subject == "Tất cả môn học":
+                self._process_all_documents()
+            else:
+                self._process_subject_documents(subject)
+        else:
+            print(f"Using existing collection: {self.collection_name}")
+    
+    def _sanitize_collection_name(self, name: str) -> str:
+        """Convert subject name to valid collection name"""
+        # Remove Vietnamese accents and convert to lowercase
+        name = name.lower()
+        # Replace spaces and special chars with underscore
+        name = re.sub(r'[^a-z0-9_]', '_', name)
+        # Remove multiple underscores
+        name = re.sub(r'_+', '_', name)
+        # Remove leading/trailing underscores
+        name = name.strip('_')
+        return name or "unknown_subject"
+    
+    def _collection_exists(self) -> bool:
+        """Check if collection exists in Qdrant."""
+        try:
+            collections = self.qdrant_client.get_collections()
+            return any(collection.name == self.collection_name for collection in collections.collections)
+        except Exception as e:
+            print(f"Error checking collection existence: {e}")
+            return False
+    
+    def _create_collection(self):
+        """Create Qdrant collection."""
+        try:
+            # Get embedding dimension
+            sample_embedding = self.embedding_model.encode(["sample text"])
+            embedding_dim = sample_embedding.shape[1]
+            
+            self.qdrant_client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(size=embedding_dim, distance=Distance.COSINE)
+            )
+            print(f"Created collection: {self.collection_name}")
+        except Exception as e:
+            print(f"Error creating collection: {e}")
+            # Collection might already exist, continue
+            pass
+    
+    def _process_all_documents(self):
+        """Process all documents from /data folder."""
+        data_folder = "data"
+        if not os.path.exists(data_folder):
+            raise ValueError("Data folder not found")
         
-        # Define a more general prompt template for multiple documents
-        prompt_template = """
+        # Create collection
+        self._create_collection()
+        
+        all_chunks = []
+        
+        # Process each subject folder
+        for subject_folder in os.listdir(data_folder):
+            subject_path = os.path.join(data_folder, subject_folder)
+            if os.path.isdir(subject_path):
+                chunks = self._process_subject_folder(subject_folder, subject_path)
+                all_chunks.extend(chunks)
+        
+        # Add all chunks to vector store
+        if all_chunks:
+            self._add_chunks_to_vectorstore(all_chunks)
+            print(f"Processed total {len(all_chunks)} chunks from all subjects")
+        else:
+            raise ValueError("No PDF files found in data folder")
+    
+    def _process_subject_documents(self, subject: str):
+        """Process documents for a specific subject."""
+        subject_path = os.path.join("data", subject)
+        if not os.path.exists(subject_path):
+            raise ValueError(f"Subject folder '{subject}' not found")
+        
+        # Create collection
+        self._create_collection()
+        
+        chunks = self._process_subject_folder(subject, subject_path)
+        
+        if chunks:
+            self._add_chunks_to_vectorstore(chunks)
+            print(f"Processed {len(chunks)} chunks for subject: {subject}")
+        else:
+            raise ValueError(f"No PDF files found for subject: {subject}")
+    
+    def _process_subject_folder(self, subject_name: str, subject_path: str) -> List[Dict]:
+        """Process all PDF files in a subject folder."""
+        chunks = []
+        
+        for filename in os.listdir(subject_path):
+            if filename.endswith('.pdf'):
+                file_path = os.path.join(subject_path, filename)
+                try:
+                    # Extract text using pymupdf4llm
+                    md_text = pymupdf4llm.to_markdown(file_path)
+                    
+                    # Split text into chunks using RecursiveCharacterTextSplitter
+                    text_chunks = self.text_splitter.split_text(md_text)
+                    
+                    # Create chunk data with metadata
+                    for i, chunk_text in enumerate(text_chunks):
+                        if chunk_text.strip():  # Only add non-empty chunks
+                            # Estimate page number (rough approximation)
+                            page_num = i // 2 + 1  # Assuming ~2 chunks per page
+                            
+                            chunk_data = {
+                                'text': chunk_text,
+                                'metadata': {
+                                    'subject': subject_name,
+                                    'file': filename,
+                                    'page': page_num,
+                                    'chunk_id': i
+                                }
+                            }
+                            chunks.append(chunk_data)
+                    
+                    print(f"Processed {filename}: {len(text_chunks)} chunks")
+                    
+                except Exception as e:
+                    print(f"Error processing {filename}: {e}")
+                    continue
+        
+        return chunks
+    
+    def _add_chunks_to_vectorstore(self, chunks: List[Dict]):
+        """Add chunks to Qdrant vector store."""
+        points = []
+        
+        for chunk in chunks:
+            try:
+                # Create embedding
+                embedding = self.embedding_model.encode([chunk['text']])[0]
+                
+                # Create point
+                point = PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=embedding.tolist(),
+                    payload={
+                        'text': chunk['text'],
+                        'subject': chunk['metadata']['subject'],
+                        'file': chunk['metadata']['file'],
+                        'page': chunk['metadata']['page'],
+                        'chunk_id': chunk['metadata']['chunk_id']
+                    }
+                )
+                points.append(point)
+                
+            except Exception as e:
+                print(f"Error creating embedding for chunk: {e}")
+                continue
+        
+        # Add points to collection
+        if points:
+            try:
+                self.qdrant_client.upsert(
+                    collection_name=self.collection_name,
+                    points=points
+                )
+                print(f"Added {len(points)} points to collection {self.collection_name}")
+            except Exception as e:
+                print(f"Error adding points to collection: {e}")
+    
+    def _retrieve_relevant_chunks(self, query: str, k: int = 5) -> List[Dict]:
+        """Retrieve relevant chunks from vector store."""
+        try:
+            # Create query embedding
+            query_embedding = self.embedding_model.encode([query])[0]
+            
+            # Search in Qdrant
+            search_results = self.qdrant_client.search(
+                collection_name=self.collection_name,
+                query_vector=query_embedding.tolist(),
+                limit=k
+            )
+            
+            # Extract relevant information
+            relevant_chunks = []
+            for result in search_results:
+                chunk_info = {
+                    'text': result.payload['text'],
+                    'subject': result.payload['subject'],
+                    'file': result.payload['file'],
+                    'page': result.payload['page'],
+                    'score': result.score
+                }
+                relevant_chunks.append(chunk_info)
+            
+            return relevant_chunks
+            
+        except Exception as e:
+            print(f"Error retrieving chunks: {e}")
+            return []
+    
+    def get_response(self, query: str) -> str:
+        """Get a response for the given query."""
+        try:
+            # Retrieve relevant chunks
+            relevant_chunks = self._retrieve_relevant_chunks(query)
+            
+            if not relevant_chunks:
+                return "I don't know. No relevant information found in the documents."
+            
+            # Prepare context
+            context_parts = []
+            for chunk in relevant_chunks:
+                source_info = f"[{chunk['subject']} - {chunk['file']} - Page {chunk['page']}]"
+                context_parts.append(f"{source_info}\n{chunk['text']}")
+            
+            context = "\n\n".join(context_parts)
+            
+            # Simple prompt
+            prompt_template = """
         You are an AI assistant designed to provide relevant and insightful answers based on the context from multiple documents.
         Use the following context to answer the user's question:
 
@@ -95,39 +312,75 @@ class RAGProcessor: # Handles the RAG pipeline processing for multiple PDFs
 
         Your Answer:
         """
-        
-        PROMPT = PromptTemplate(
-            template=prompt_template,
-            input_variables=["context", "question"]
-        )
-        
-        # Create memory
-        memory = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True
-        )
-        
-        # Initialize the model
-        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.2)
-        
-        # Create the conversation chain
-        conversation_chain = ConversationalRetrievalChain.from_llm(
-            llm=llm,
-            retriever=vector_store.as_retriever(search_kwargs={"k": 5}),  # Increase k for multiple docs
-            memory=memory,
-            combine_docs_chain_kwargs={"prompt": PROMPT}
-        )
-        
-        # Store document info for reference
-        self.document_info = document_info
-        
-        return conversation_chain
+
+            
+            prompt = PromptTemplate(
+                template=prompt_template,
+                input_variables=["context", "question"]
+            )
+            
+            # Generate response
+            formatted_prompt = prompt.format(context=context, question=query)
+            response = self.llm.invoke(formatted_prompt)
+            
+            return response.content
+            
+        except Exception as e:
+            print(f"Error generating response: {e}")
+            return f"Error: {str(e)}"
     
-    def get_response(self, query):
-        """Get a response for the given query."""
-        response = self.conversation_chain.invoke({"question": query})
-        return response['answer']
+    def clear_database(self, subject: Optional[str] = None):
+        """Clear database - specific collection or all collections."""
+        try:
+            if subject is None:
+                # Clear current collection
+                collection_name = self.collection_name
+            elif subject == "all":
+                # Clear all collections
+                collections = self.qdrant_client.get_collections()
+                for collection in collections.collections:
+                    try:
+                        self.qdrant_client.delete_collection(collection.name)
+                        print(f"Deleted collection: {collection.name}")
+                    except Exception as e:
+                        print(f"Error deleting collection {collection.name}: {e}")
+                return
+            else:
+                # Clear specific subject collection
+                collection_name = self._sanitize_collection_name(subject)
+            
+            # Delete the collection
+            self.qdrant_client.delete_collection(collection_name)
+            print(f"Deleted collection: {collection_name}")
+            
+        except Exception as e:
+            print(f"Error clearing database: {e}")
     
-    def get_document_info(self):
-        """Get information about processed documents."""
-        return self.document_info
+    @staticmethod
+    def get_available_subjects() -> List[str]:
+        """Get list of available subjects."""
+        data_folder = "data"
+        if not os.path.exists(data_folder):
+            return []
+        
+        subjects = [folder for folder in os.listdir(data_folder) 
+                   if os.path.isdir(os.path.join(data_folder, folder))]
+        return sorted(subjects)
+    
+    @staticmethod
+    def get_subject_files(subject: str) -> List[str]:
+        """Get list of PDF files for a specific subject."""
+        subject_path = os.path.join("data", subject)
+        if not os.path.exists(subject_path):
+            return []
+        
+        pdf_files = [f for f in os.listdir(subject_path) if f.endswith('.pdf')]
+        return sorted(pdf_files)
+    
+    def __del__(self):
+        """Cleanup Qdrant client."""
+        try:
+            if hasattr(self, 'qdrant_client'):
+                self.qdrant_client.close()
+        except:
+            pass

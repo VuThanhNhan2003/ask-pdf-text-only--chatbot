@@ -14,3 +14,7 @@ Thumbs.db
 # Ignore .env file
 .env
 
+data/
+devcontainer/
+models/
+vectordb/
