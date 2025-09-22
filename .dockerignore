@@ -9,7 +9,10 @@ README.md
 .DS_Store
 Thumbs.db
 *.log
+.idea/
 
 # Ignore VSCode settings (nếu có)
 .vscode/
-
+data/
+models/
+docker/
