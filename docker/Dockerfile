@@ -12,12 +12,12 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Chỉ copy file dependencies để tận dụng cache khi code thay đổi
-COPY requirements.txt /app/requirements.txt
+# Copy dependencies (từ root repo vào container)
+COPY ../requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Tạo sẵn các thư mục hay dùng
-RUN mkdir -p /app/data /app/models
+RUN mkdir -p /app/src /app/data /app/models
 
 # Streamlit mặc định chạy port 8501
 EXPOSE 8501

@@ -1,5 +1,5 @@
 import streamlit as st
-from processor import RAGProcessor
+from .processor import RAGProcessor
 import os
 from typing import Dict, List, Tuple
 

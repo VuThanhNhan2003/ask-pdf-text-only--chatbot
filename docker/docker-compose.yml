@@ -1,17 +1,14 @@
-version: "3.9"
+version: "3.8"
 
 services:
   qdrant:
     image: qdrant/qdrant:latest
-    # container_name: qdrant   # Tùy chọn
     ports:
       - "6333:6333"  # HTTP API
-      # - "6334:6334"  # gRPC (bật nếu cần)
     volumes:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
     healthcheck:
-      # Qdrant có endpoint sẵn để check sẵn sàng
       test: ["CMD-SHELL", "curl -fsS http://localhost:6333/readyz || exit 1"]
       interval: 5s
       timeout: 3s
@@ -19,46 +16,29 @@ services:
 
   app:
     build:
-      context: .
-      dockerfile: Dockerfile
-    # container_name: rag_pipeline_app  # Tùy chọn
+      context: ..
+      dockerfile: docker/Dockerfile
     depends_on:
       qdrant:
         condition: service_healthy
     environment:
-      # App trỏ đến Qdrant qua network Docker
       QDRANT_URL: http://qdrant:6333
-
-      # Cho phép đổi/switch model nhanh mà không rebuild
       MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2
       MODEL_DIR: /app/models
-
-      # Cache Hugging Face để không phải tải lại nhiều lần
       HF_HOME: /hf_cache
-
-      # Đảm bảo import từ /app
-      PYTHONPATH: /app
+      PYTHONPATH: /app/src
       PYTHONUNBUFFERED: "1"
-    # Nếu dùng .env, mở dòng dưới (tùy chọn)
-    # env_file:
-    #   - .env
     volumes:
-      # Bind mount toàn bộ project: sửa code là phản ánh ngay
-      - ./:/app
-
-      # Bind mount models để test/switch nhanh
-      - ./models:/app/models
-
-      # Named volume cho cache model (tiết kiệm thời gian tải lại)
-      - hf_cache:/hf_cache
-
+      - ../src:/app/src        # chỉ mount code
+      - ../models:/app/models  # mount models
+      - ../data:/app/data      # mount data
+      - hf_cache:/hf_cache     # huggingface cache
     command: >
-      sh -c "streamlit run app.py
+      sh -c "streamlit run src/app.py
              --server.port=8501
              --server.address=0.0.0.0
              --server.headless=true
              --server.runOnSave=true"
-
     ports:
       - "8501:8501"
     restart: unless-stopped
