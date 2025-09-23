@@ -24,6 +24,8 @@ services:
        - qdrant
 #      qdrant:
 #        condition: service_healthy
+    env_file:
+      - ../.env   # load toàn bộ biến môi trường từ file .env
     environment:
       QDRANT_URL: http://qdrant:6333
       MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2
@@ -37,7 +39,7 @@ services:
       - ../data:/app/data      # mount data
       - hf_cache:/hf_cache     # huggingface cache
     command: >
-      sh -c "streamlit run src/app.py
+      sh -c "cd /app/src && streamlit run app.py
              --server.port=8501
              --server.address=0.0.0.0
              --server.headless=true
