@@ -9,18 +9,21 @@ services:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:6333/readyz || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
+       disable: true
+#      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6333/healthz"]
+#      interval: 10s
+#      timeout: 5s
+#      retries: 5
+#      start_period: 20s
 
   app:
     build:
       context: ..
       dockerfile: docker/Dockerfile
     depends_on:
-      qdrant:
-        condition: service_healthy
+       - qdrant
+#      qdrant:
+#        condition: service_healthy
     environment:
       QDRANT_URL: http://qdrant:6333
       MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2

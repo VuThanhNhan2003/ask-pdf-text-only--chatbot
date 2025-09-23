@@ -7,7 +7,9 @@ python-dotenv==1.1.1
 qdrant-client==1.15.1
 pymupdf4llm==0.0.27
 sentence-transformers==5.1.0
-torch==2.8.0
+torch==2.8.0+cpu
 transformers==4.56.0
 numpy==1.26.4
 pandas==2.3.2
+
+--extra-index-url https://download.pytorch.org/whl/cpu
