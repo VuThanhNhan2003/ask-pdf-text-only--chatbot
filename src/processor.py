@@ -296,21 +296,21 @@ class RAGProcessor:
             
             # Simple prompt
             prompt_template = """
-        You are an AI assistant designed to provide relevant and insightful answers based on the context from multiple documents.
-        Use the following context to answer the user's question:
+        Bạn là một trợ lý AI được thiết kế để cung cấp các câu trả lời phù hợp và sâu sắc dựa trên ngữ cảnh từ nhiều tài liệu khác nhau.
+        Hãy sử dụng ngữ cảnh sau để trả lời câu hỏi của người dùng:
 
-        Context: {context}
+        Ngữ cảnh: {context}
 
-        User's Question: {question}
+        Câu hỏi của người dùng: {question}
 
-        Your answer should:
-        1. Be clear, concise, and directly based on the context provided.
-        2. Include specific details from the documents when relevant.
-        3. When possible, mention which document the information comes from.
-        4. State if you don't know the answer, and provide guidance on where to find the information if possible.
-        5. If information from multiple documents is relevant, synthesize it coherently.
+        Câu trả lời của bạn cần:
+        1. Rõ ràng, ngắn gọn và dựa trực tiếp vào ngữ cảnh đã cung cấp.
+        2. Bao gồm các chi tiết cụ thể từ tài liệu khi phù hợp.
+        3. Nếu có thể, hãy nêu rõ thông tin đó đến từ tài liệu nào.
+        4. Nếu bạn không biết câu trả lời, hãy nói rõ và hướng dẫn nơi có thể tìm thấy thông tin nếu có thể.
+        5. Nếu có nhiều tài liệu liên quan, hãy tổng hợp thông tin một cách mạch lạc.
 
-        Your Answer:
+        Câu trả lời của bạn:
         """
 
             
