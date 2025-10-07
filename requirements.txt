@@ -1,15 +1,42 @@
+# Core dependencies
 streamlit==1.49.1
+python-dotenv==1.1.1
+
+# RAG & LLM
 langchain==0.2.17
 langchain-google-genai==1.0.10
 langchain-community==0.2.19
 google-generativeai==0.7.2
-python-dotenv==1.1.1
-qdrant-client==1.15.1
-pymupdf4llm==0.0.27
+
+# Embeddings & Vector Store
 sentence-transformers==5.1.0
+qdrant-client==1.15.1
+
+# ML/AI Framework
 torch==2.8.0+cpu
 transformers==4.56.0
+
+# PDF Processing
+pymupdf
+pymupdf4llm==0.0.27
+
+# Data Processing
 numpy==1.26.4
 pandas==2.3.2
+
+# Database - NEW
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10  # PostgreSQL adapter
+alembic==1.14.0  # Database migrations (optional)
+
+# Authentication - NEW
+bcrypt==4.2.1
+
+# Optional JWT (if you want token-based auth later)
+# pyjwt==2.10.1
+
+# Development (optional)
+# pytest==8.3.4
+# pytest-asyncio==0.24.0
 
 --extra-index-url https://download.pytorch.org/whl/cpu

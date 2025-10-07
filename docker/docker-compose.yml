@@ -1,45 +1,82 @@
 version: "3.8"
 
 services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: chatbot_postgres
+    environment:
+      POSTGRES_DB: chatbot_db
+      POSTGRES_USER: chatbot_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chatbot_pass_2024}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatbot_user -d chatbot_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Qdrant Vector Database
   qdrant:
     image: qdrant/qdrant:latest
+    container_name: chatbot_qdrant
     ports:
-      - "6333:6333"  # HTTP API
+      - "6333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
     healthcheck:
-       disable: true
-#      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6333/healthz"]
-#      interval: 10s
-#      timeout: 5s
-#      retries: 5
-#      start_period: 20s
+      disable: true
 
+  # Main Application
   app:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    container_name: chatbot_app
     depends_on:
-       - qdrant
-#      qdrant:
-#        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
     env_file:
-      - ../.env   # load toàn bộ biến môi trường từ file .env
+      - ../.env
     environment:
+      # Database
+      DATABASE_URL: postgresql://chatbot_user:${POSTGRES_PASSWORD:-chatbot_pass_2024}@postgres:5432/chatbot_db
+      
+      # Qdrant
       QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: documents
+      
+      # Model
       MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2
       MODEL_DIR: /app/models
       HF_HOME: /hf_cache
-      PYTHONPATH: /app/src
+      
+      # Python
+      PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
+      
+      # # Google API Key (from .env)
+      # GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      
     volumes:
-      - ../src:/app/src        # chỉ mount code
-      - ../models:/app/models  # mount models
-      - ../data:/app/data      # mount data
-      - hf_cache:/hf_cache     # huggingface cache
+      - ../src:/app/src
+      - ../database:/app/database
+      - ../auth:/app/auth
+      - ../services:/app/services
+      - ../components:/app/components
+      - ../models:/app/models
+      - ../data:/app/data
+      - ../logs:/app/logs
+      - hf_cache:/hf_cache
     command: >
-      sh -c "cd /app/src && streamlit run app.py
+      sh -c "cd /app && streamlit run src/app_v2.py
              --server.port=8501
              --server.address=0.0.0.0
              --server.headless=true
@@ -54,5 +91,6 @@ services:
       retries: 10
 
 volumes:
+  postgres_data:
   qdrant_data:
   hf_cache:

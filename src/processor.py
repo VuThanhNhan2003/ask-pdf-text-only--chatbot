@@ -1,386 +1,597 @@
+"""
+Optimized RAG Processor with logging, better error handling, and performance improvements
+"""
+import hashlib
+import logging
 import os
-import pymupdf4llm
-from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import PromptTemplate
-from langchain.memory import ConversationBufferMemory
+import time
+from typing import Dict, List, Optional, Generator
+from datetime import datetime
+
+import fitz  # PyMuPDF
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-import uuid
-import re
-from typing import List, Dict, Optional
-from dotenv import load_dotenv
+from langchain_google_genai import ChatGoogleGenerativeAI
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
+from sentence_transformers import SentenceTransformer
 
-load_dotenv()
+from config import config
 
-# Global variables để cache embedding model
-_embedding_model = None
-_embedding_model_path = None
 
-def get_embedding_model():
-    """Get cached embedding model"""
-    global _embedding_model, _embedding_model_path
+# =====================================================================
+# LOGGING SETUP
+# =====================================================================
+def setup_logging() -> logging.Logger:
+    """Setup logging with file and console handlers"""
+    logger = logging.getLogger("RAGProcessor")
+    logger.setLevel(logging.INFO)
     
+    # Prevent duplicate handlers
+    if logger.handlers:
+        return logger
+    
+    # File handler
+    log_file = os.path.join(
+        config.app.log_folder, 
+        f"rag_{datetime.now().strftime('%Y%m%d')}.log"
+    )
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)
+    
+    # Formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+
+logger = setup_logging()
+
+
+# =====================================================================
+# UTILITY FUNCTIONS
+# =====================================================================
+def make_chunk_id(subject: str, filename: str, chunk_index: int, chunk_text: str) -> str:
+    """Create a deterministic chunk ID based on file and content."""
+    # Include chunk index for better uniqueness
+    raw = f"{subject}/{filename}/chunk_{chunk_index}/{chunk_text[:100]}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def validate_pdf(file_path: str) -> bool:
+    """Validate PDF file before processing"""
+    try:
+        if not os.path.exists(file_path):
+            return False
+        
+        # Check file size (max 50MB)
+        file_size = os.path.getsize(file_path) / (1024 * 1024)
+        if file_size > 50:
+            logger.warning(f"File too large: {file_path} ({file_size:.2f}MB)")
+            return False
+        
+        # Try to open with PyMuPDF
+        with fitz.open(file_path) as doc:
+            if len(doc) == 0:
+                return False
+        
+        return True
+    except Exception as e:
+        logger.error(f"PDF validation failed for {file_path}: {e}")
+        return False
+
+
+# =====================================================================
+# EMBEDDING MODEL CACHE
+# =====================================================================
+_embedding_model = None
+
+def get_embedding_model() -> SentenceTransformer:
+    """Get cached embedding model"""
+    global _embedding_model
+
     if _embedding_model is None:
-        model_name = "sentence-transformers/all-MiniLM-L6-v2"
-        local_model_path = "models/all-MiniLM-L6-v2"
-        
-        if not os.path.exists(local_model_path):
-            print(f"Downloading model {model_name}...")
-            os.makedirs("models", exist_ok=True)
-            model = SentenceTransformer(model_name)
-            model.save_pretrained(local_model_path)
-            print(f"Model downloaded and saved to {local_model_path}")
-        else:
-            print(f"Loading model from local path: {local_model_path}")
-        
-        _embedding_model = SentenceTransformer(local_model_path, local_files_only=True)
-        _embedding_model_path = local_model_path
+        try:
+            local_path = config.embedding.local_path
+            
+            if not os.path.exists(local_path):
+                logger.info(f"📥 Downloading model {config.embedding.model_name}...")
+                os.makedirs(config.embedding.cache_folder, exist_ok=True)
+                model = SentenceTransformer(config.embedding.model_name)
+                model.save(local_path)
+                logger.info(f"✅ Model saved to {local_path}")
+            else:
+                logger.info(f"📂 Loading model from {local_path}")
+
+            _embedding_model = SentenceTransformer(local_path, local_files_only=True)
+            logger.info("✅ Embedding model loaded successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to load embedding model: {e}")
+            raise
     
     return _embedding_model
 
+
+# =====================================================================
+# RAG PROCESSOR
+# =====================================================================
 class RAGProcessor:
-    def __init__(self, subject=None):
+    """Optimized RAG Processor with streaming support"""
+    
+    def __init__(self, subject: Optional[str] = None):
         """Initialize the RAG processor for a specific subject."""
-        os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
+        logger.info(f"Initializing RAGProcessor for subject: {subject}")
+        start_time = time.time()
         
-        # Use cached embedding model
-        self.embedding_model = get_embedding_model()
-        
-        # Initialize Qdrant client (Docker service)
-        self.qdrant_client = QdrantClient(host="qdrant", port=6333)
-        
-        # Set collection name based on subject
-        if subject is None or subject == "Tất cả môn học":
-            self.collection_name = "all_subjects"
-            self.subject = "Tất cả môn học"
-        else:
-            # Convert subject name to valid collection name
-            self.collection_name = self._sanitize_collection_name(subject)
-            self.subject = subject
-        
-        # Initialize LLM
-        self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash-exp", 
-            temperature=0.1
-        )
-        
-        # Initialize memory
-        self.memory = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True
-        )
-        
-        # Initialize text splitter
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""]
-        )
-        
-        # Process documents if collection doesn't exist
-        if not self._collection_exists():
-            print(f"Collection '{self.collection_name}' not found. Processing documents...")
-            if self.subject == "Tất cả môn học":
-                self._process_all_documents()
+        try:
+            # Use cached embedding model
+            self.embedding_model = get_embedding_model()
+            
+            # Initialize Qdrant client
+            self.qdrant_client = QdrantClient(
+                host=config.qdrant.host,
+                port=config.qdrant.port,
+                timeout=config.qdrant.timeout
+            )
+            
+            # Subject filter
+            if subject is None or subject == "Tất cả môn học":
+                self.subject = "Tất cả môn học"
+                self.subject_filter: Optional[str] = None
             else:
-                self._process_subject_documents(subject)
-        else:
-            print(f"Using existing collection: {self.collection_name}")
-    
-    def _sanitize_collection_name(self, name: str) -> str:
-        """Convert subject name to valid collection name"""
-        # Remove Vietnamese accents and convert to lowercase
-        name = name.lower()
-        # Replace spaces and special chars with underscore
-        name = re.sub(r'[^a-z0-9_]', '_', name)
-        # Remove multiple underscores
-        name = re.sub(r'_+', '_', name)
-        # Remove leading/trailing underscores
-        name = name.strip('_')
-        return name or "unknown_subject"
-    
+                self.subject = subject
+                self.subject_filter = subject
+            
+            self.collection_name = config.qdrant.collection_name
+            self.data_folder = config.app.data_folder
+            
+            # Initialize LLM
+            self.llm = ChatGoogleGenerativeAI(
+                model=config.llm.model_name,
+                temperature=config.llm.temperature,
+                max_output_tokens=config.llm.max_output_tokens,
+                google_api_key=config.llm.api_key
+            )
+            
+            # Initialize text splitter
+            self.text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=config.chunking.chunk_size,
+                chunk_overlap=config.chunking.chunk_overlap,
+                separators=config.chunking.separators,
+            )
+            
+            # Ensure collection exists
+            self._ensure_collection()
+            
+            elapsed = time.time() - start_time
+            logger.info(f"✅ RAGProcessor initialized in {elapsed:.2f}s")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize RAGProcessor: {e}")
+            raise
+
+    # ================================================================
+    # COLLECTION MANAGEMENT
+    # ================================================================
     def _collection_exists(self) -> bool:
-        """Check if collection exists in Qdrant."""
+        """Check if collection exists"""
         try:
             collections = self.qdrant_client.get_collections()
-            return any(collection.name == self.collection_name for collection in collections.collections)
+            return any(c.name == self.collection_name for c in collections.collections)
         except Exception as e:
-            print(f"Error checking collection existence: {e}")
+            logger.error(f"Error checking collection existence: {e}")
             return False
-    
-    def _create_collection(self):
-        """Create Qdrant collection."""
+
+    def _ensure_collection(self):
+        """Ensure collection exists with proper configuration"""
+        if self._collection_exists():
+            logger.info(f"📂 Using existing collection: {self.collection_name}")
+            return
+
         try:
-            # Get embedding dimension
-            sample_embedding = self.embedding_model.encode(["sample text"])
-            embedding_dim = sample_embedding.shape[1]
-            
+            embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
             self.qdrant_client.create_collection(
                 collection_name=self.collection_name,
-                vectors_config=VectorParams(size=embedding_dim, distance=Distance.COSINE)
+                vectors_config=VectorParams(
+                    size=embedding_dim, 
+                    distance=Distance.COSINE
+                ),
             )
-            print(f"Created collection: {self.collection_name}")
+            logger.info(f"✅ Created collection: {self.collection_name}")
         except Exception as e:
-            print(f"Error creating collection: {e}")
-            # Collection might already exist, continue
-            pass
-    
-    def _process_all_documents(self):
-        """Process all documents from /data folder."""
-        data_folder = "data"
-        if not os.path.exists(data_folder):
-            raise ValueError("Data folder not found")
+            logger.error(f"Failed to create collection: {e}")
+            raise
+
+    # ================================================================
+    # PDF PROCESSING
+    # ================================================================
+    def _extract_text_from_pdf(self, pdf_path: str) -> List[Dict]:
+        """
+        Extract text from PDF with page information
+        Returns list of {page_num, text}
+        """
+        pages_data = []
+        try:
+            with fitz.open(pdf_path) as doc:
+                for page_num, page in enumerate(doc, start=1):
+                    text = page.get_text("text").strip()
+                    if text:  # Only add non-empty pages
+                        pages_data.append({
+                            "page_num": page_num,
+                            "text": text
+                        })
+            logger.info(f"📄 Extracted {len(pages_data)} pages from {os.path.basename(pdf_path)}")
+        except Exception as e:
+            logger.error(f"Failed to extract text from {pdf_path}: {e}")
+            raise
         
-        # Create collection
-        self._create_collection()
+        return pages_data
+
+    def _process_subject_folder(
+        self, subject_name: str, subject_path: str
+    ) -> List[Dict]:
+        """Process all PDFs in a subject folder"""
+        chunks: List[Dict] = []
+        pdf_files = sorted([f for f in os.listdir(subject_path) if f.endswith(".pdf")])
         
-        all_chunks = []
-        
-        # Process each subject folder
-        for subject_folder in os.listdir(data_folder):
-            subject_path = os.path.join(data_folder, subject_folder)
-            if os.path.isdir(subject_path):
-                chunks = self._process_subject_folder(subject_folder, subject_path)
-                all_chunks.extend(chunks)
-        
-        # Add all chunks to vector store
-        if all_chunks:
-            self._add_chunks_to_vectorstore(all_chunks)
-            print(f"Processed total {len(all_chunks)} chunks from all subjects")
-        else:
-            raise ValueError("No PDF files found in data folder")
-    
-    def _process_subject_documents(self, subject: str):
-        """Process documents for a specific subject."""
-        subject_path = os.path.join("data", subject)
-        if not os.path.exists(subject_path):
-            raise ValueError(f"Subject folder '{subject}' not found")
-        
-        # Create collection
-        self._create_collection()
-        
-        chunks = self._process_subject_folder(subject, subject_path)
-        
-        if chunks:
-            self._add_chunks_to_vectorstore(chunks)
-            print(f"Processed {len(chunks)} chunks for subject: {subject}")
-        else:
-            raise ValueError(f"No PDF files found for subject: {subject}")
-    
-    def _process_subject_folder(self, subject_name: str, subject_path: str) -> List[Dict]:
-        """Process all PDF files in a subject folder."""
-        chunks = []
-        
-        for filename in os.listdir(subject_path):
-            if filename.endswith('.pdf'):
-                file_path = os.path.join(subject_path, filename)
-                try:
-                    # Extract text using pymupdf4llm
-                    md_text = pymupdf4llm.to_markdown(file_path)
-                    
-                    # Split text into chunks using RecursiveCharacterTextSplitter
-                    text_chunks = self.text_splitter.split_text(md_text)
-                    
-                    # Create chunk data with metadata
-                    for i, chunk_text in enumerate(text_chunks):
-                        if chunk_text.strip():  # Only add non-empty chunks
-                            # Estimate page number (rough approximation)
-                            page_num = i // 2 + 1  # Assuming ~2 chunks per page
-                            
-                            chunk_data = {
-                                'text': chunk_text,
-                                'metadata': {
-                                    'subject': subject_name,
-                                    'file': filename,
-                                    'page': page_num,
-                                    'chunk_id': i
-                                }
-                            }
-                            chunks.append(chunk_data)
-                    
-                    print(f"Processed {filename}: {len(text_chunks)} chunks")
-                    
-                except Exception as e:
-                    print(f"Error processing {filename}: {e}")
-                    continue
-        
-        return chunks
-    
-    def _add_chunks_to_vectorstore(self, chunks: List[Dict]):
-        """Add chunks to Qdrant vector store."""
-        points = []
-        
-        for chunk in chunks:
+        logger.info(f"📚 Processing {len(pdf_files)} PDFs for subject: {subject_name}")
+
+        for filename in pdf_files:
+            file_path = os.path.join(subject_path, filename)
+            
+            # Validate PDF first
+            if not validate_pdf(file_path):
+                logger.warning(f"⚠️ Skipping invalid PDF: {filename}")
+                continue
+
             try:
-                # Create embedding
-                embedding = self.embedding_model.encode([chunk['text']])[0]
+                # Extract pages with text
+                pages_data = self._extract_text_from_pdf(file_path)
                 
-                # Create point
+                pending_chunks: List[Dict] = []
+                
+                # Process each page
+                for page_data in pages_data:
+                    page_num = page_data["page_num"]
+                    page_text = page_data["text"]
+                    
+                    # Split page text into chunks
+                    text_chunks = self.text_splitter.split_text(page_text)
+                    
+                    for chunk_idx, chunk_text in enumerate(text_chunks):
+                        chunk_text = chunk_text.strip()
+                        if not chunk_text:
+                            continue
+
+                        chunk_id = make_chunk_id(
+                            subject_name, filename, chunk_idx, chunk_text
+                        )
+
+                        pending_chunks.append({
+                            "id": chunk_id,
+                            "text": chunk_text,
+                            "metadata": {
+                                "subject": subject_name,
+                                "file": filename,
+                                "page": page_num,
+                                "chunk_id": chunk_id,
+                            },
+                        })
+
+                # Filter out existing chunks
+                new_chunks = self._filter_existing_chunks(pending_chunks)
+                if new_chunks:
+                    chunks.extend(new_chunks)
+                    logger.info(f"➕ {filename}: {len(new_chunks)} new chunks")
+                else:
+                    logger.info(f"✅ {filename}: up-to-date")
+
+            except Exception as e:
+                logger.error(f"Error processing {filename}: {e}", exc_info=True)
+                continue
+
+        return chunks
+
+    def _filter_existing_chunks(self, chunk_items: List[Dict]) -> List[Dict]:
+        """Filter out chunks that already exist in the database"""
+        if not chunk_items:
+            return []
+
+        chunk_ids = [chunk["id"] for chunk in chunk_items]
+        existing_ids = set()
+
+        try:
+            # Batch retrieve to check existence
+            existing_points = self.qdrant_client.retrieve(
+                collection_name=self.collection_name,
+                ids=chunk_ids,
+                with_payload=False,
+                with_vectors=False,
+            )
+            existing_ids = {str(point.id) for point in existing_points}
+            
+        except Exception as e:
+            logger.warning(f"Error retrieving existing chunks: {e}")
+
+        new_chunks = [c for c in chunk_items if c["id"] not in existing_ids]
+        logger.info(f"📊 Found {len(new_chunks)} new chunks out of {len(chunk_items)}")
+        
+        return new_chunks
+
+    def _add_chunks_to_vectorstore(self, chunks: List[Dict]):
+        """Add chunks to vector store with batching"""
+        if not chunks:
+            return
+
+        try:
+            texts = [chunk["text"] for chunk in chunks]
+            
+            # Batch encode for efficiency
+            logger.info(f"🔢 Encoding {len(texts)} chunks...")
+            embeddings = self.embedding_model.encode(
+                texts,
+                batch_size=config.embedding.batch_size,
+                show_progress_bar=False,
+            )
+
+            # Create points
+            points: List[PointStruct] = []
+            for chunk, embedding in zip(chunks, embeddings):
                 point = PointStruct(
-                    id=str(uuid.uuid4()),
+                    id=chunk["id"],
                     vector=embedding.tolist(),
                     payload={
-                        'text': chunk['text'],
-                        'subject': chunk['metadata']['subject'],
-                        'file': chunk['metadata']['file'],
-                        'page': chunk['metadata']['page'],
-                        'chunk_id': chunk['metadata']['chunk_id']
-                    }
+                        "text": chunk["text"],
+                        "subject": chunk["metadata"]["subject"],
+                        "file": chunk["metadata"]["file"],
+                        "page": chunk["metadata"]["page"],
+                        "chunk_id": chunk["metadata"]["chunk_id"],
+                    },
                 )
                 points.append(point)
-                
-            except Exception as e:
-                print(f"Error creating embedding for chunk: {e}")
-                continue
-        
-        # Add points to collection
-        if points:
-            try:
-                self.qdrant_client.upsert(
-                    collection_name=self.collection_name,
-                    points=points
-                )
-                print(f"Added {len(points)} points to collection {self.collection_name}")
-            except Exception as e:
-                print(f"Error adding points to collection: {e}")
-    
-    def _retrieve_relevant_chunks(self, query: str, k: int = 5) -> List[Dict]:
-        """Retrieve relevant chunks from vector store."""
-        try:
-            # Create query embedding
-            query_embedding = self.embedding_model.encode([query])[0]
+
+            # Batch upsert
+            self.qdrant_client.upsert(
+                collection_name=self.collection_name, 
+                points=points
+            )
+            logger.info(f"📌 Added {len(points)} points to {self.collection_name}")
             
-            # Search in Qdrant
+        except Exception as e:
+            logger.error(f"Failed to add chunks to vectorstore: {e}")
+            raise
+
+    # ================================================================
+    # PUBLIC APIs
+    # ================================================================
+    def reload_data(self, clean: bool = False):
+        """Reload data for current subject or all subjects"""
+        logger.info(f"🔄 Reloading data (clean={clean})")
+        start_time = time.time()
+        
+        try:
+            if clean:
+                logger.info("♻️ Resetting collection...")
+                self.qdrant_client.delete_collection(self.collection_name)
+                self._ensure_collection()
+                # Luôn index lại toàn bộ để tránh mất dữ liệu môn khác
+                for subject in self.get_available_subjects():
+                    subject_path = os.path.join(self.data_folder, subject)
+                    new_chunks = self._process_subject_folder(subject, subject_path)
+                    self._add_chunks_to_vectorstore(new_chunks)
+
+            if self.subject_filter:
+                subject_path = os.path.join(self.data_folder, self.subject_filter)
+                new_chunks = self._process_subject_folder(self.subject_filter, subject_path)
+                self._add_chunks_to_vectorstore(new_chunks)
+            else:
+                for subject in self.get_available_subjects():
+                    subject_path = os.path.join(self.data_folder, subject)
+                    new_chunks = self._process_subject_folder(subject, subject_path)
+                    self._add_chunks_to_vectorstore(new_chunks)
+            
+            elapsed = time.time() - start_time
+            logger.info(f"✅ Data reload completed in {elapsed:.2f}s")
+            
+        except Exception as e:
+            logger.error(f"Failed to reload data: {e}")
+            raise
+
+    def _retrieve_relevant_chunks(self, query: str, k: int = None) -> List[Dict]:
+        """Retrieve relevant chunks with score filtering"""
+        if k is None:
+            k = config.retrieval.top_k
+        
+        try:
+            query_embedding = self.embedding_model.encode([query])[0]
+
+            query_filter = None
+            if self.subject_filter:
+                query_filter = Filter(
+                    must=[
+                        FieldCondition(
+                            key="subject", 
+                            match=MatchValue(value=self.subject_filter)
+                        )
+                    ]
+                )
+
             search_results = self.qdrant_client.search(
                 collection_name=self.collection_name,
                 query_vector=query_embedding.tolist(),
-                limit=k
+                limit=k,
+                query_filter=query_filter,
+                score_threshold=config.retrieval.score_threshold,
             )
-            
-            # Extract relevant information
+
             relevant_chunks = []
             for result in search_results:
-                chunk_info = {
-                    'text': result.payload['text'],
-                    'subject': result.payload['subject'],
-                    'file': result.payload['file'],
-                    'page': result.payload['page'],
-                    'score': result.score
-                }
-                relevant_chunks.append(chunk_info)
+                relevant_chunks.append({
+                    "text": result.payload["text"],
+                    "subject": result.payload["subject"],
+                    "file": result.payload["file"],
+                    "page": result.payload["page"],
+                    "score": result.score,
+                })
             
+            logger.info(f"🔍 Retrieved {len(relevant_chunks)} chunks (threshold: {config.retrieval.score_threshold})")
             return relevant_chunks
             
         except Exception as e:
-            print(f"Error retrieving chunks: {e}")
+            logger.error(f"Failed to retrieve chunks: {e}")
             return []
-    
+
     def get_response(self, query: str) -> str:
-        """Get a response for the given query."""
+        """Get response for query (non-streaming)"""
+        logger.info(f"💬 Processing query: {query[:100]}...")
+        start_time = time.time()
+        
         try:
-            # Retrieve relevant chunks
             relevant_chunks = self._retrieve_relevant_chunks(query)
-            
             if not relevant_chunks:
-                return "I don't know. No relevant information found in the documents."
-            
-            # Prepare context
-            context_parts = []
-            for chunk in relevant_chunks:
-                source_info = f"[{chunk['subject']} - {chunk['file']} - Page {chunk['page']}]"
-                context_parts.append(f"{source_info}\n{chunk['text']}")
-            
-            context = "\n\n".join(context_parts)
-            
-            # Simple prompt
-            prompt_template = """
-        Bạn là một trợ lý AI được thiết kế để cung cấp các câu trả lời phù hợp và sâu sắc dựa trên ngữ cảnh từ nhiều tài liệu khác nhau.
-        Hãy sử dụng ngữ cảnh sau để trả lời câu hỏi của người dùng:
+                logger.warning("No relevant chunks found")
+                return "❌ Không tìm thấy thông tin phù hợp trong tài liệu."
 
-        Ngữ cảnh: {context}
-
-        Câu hỏi của người dùng: {question}
-
-        Câu trả lời của bạn cần:
-        1. Rõ ràng, ngắn gọn và dựa trực tiếp vào ngữ cảnh đã cung cấp.
-        2. Bao gồm các chi tiết cụ thể từ tài liệu khi phù hợp.
-        3. Nếu có thể, hãy nêu rõ thông tin đó đến từ tài liệu nào.
-        4. Nếu bạn không biết câu trả lời, hãy nói rõ và hướng dẫn nơi có thể tìm thấy thông tin nếu có thể.
-        5. Nếu có nhiều tài liệu liên quan, hãy tổng hợp thông tin một cách mạch lạc.
-
-        Câu trả lời của bạn:
-        """
-
+            context = self._build_context(relevant_chunks)
+            prompt = self._build_prompt(context, query)
             
-            prompt = PromptTemplate(
-                template=prompt_template,
-                input_variables=["context", "question"]
-            )
+            response = self.llm.invoke(prompt)
             
-            # Generate response
-            formatted_prompt = prompt.format(context=context, question=query)
-            response = self.llm.invoke(formatted_prompt)
+            # Add sources
+            sources_text = self._format_sources(relevant_chunks)
+            full_response = f"{response.content}\n\n{sources_text}"
             
-            return response.content
+            elapsed = time.time() - start_time
+            logger.info(f"✅ Response generated in {elapsed:.2f}s")
+            
+            return full_response
             
         except Exception as e:
-            print(f"Error generating response: {e}")
-            return f"Error: {str(e)}"
-    
-    def clear_database(self, subject: Optional[str] = None):
-        """Clear database - specific collection or all collections."""
+            logger.error(f"Failed to generate response: {e}", exc_info=True)
+            return f"❌ Lỗi khi xử lý câu hỏi: {str(e)}"
+
+    def get_response_stream(self, query: str) -> Generator[str, None, None]:
+        """Get streaming response for query"""
+        logger.info(f"💬 Processing streaming query: {query[:100]}...")
+        
         try:
-            if subject is None:
-                # Clear current collection
-                collection_name = self.collection_name
-            elif subject == "all":
-                # Clear all collections
-                collections = self.qdrant_client.get_collections()
-                for collection in collections.collections:
-                    try:
-                        self.qdrant_client.delete_collection(collection.name)
-                        print(f"Deleted collection: {collection.name}")
-                    except Exception as e:
-                        print(f"Error deleting collection {collection.name}: {e}")
+            relevant_chunks = self._retrieve_relevant_chunks(query)
+            if not relevant_chunks:
+                yield "❌ Không tìm thấy thông tin phù hợp trong tài liệu."
                 return
-            else:
-                # Clear specific subject collection
-                collection_name = self._sanitize_collection_name(subject)
+
+            context = self._build_context(relevant_chunks)
+            prompt = self._build_prompt(context, query)
             
-            # Delete the collection
-            self.qdrant_client.delete_collection(collection_name)
-            print(f"Deleted collection: {collection_name}")
+            # Stream response
+            for chunk in self.llm.stream(prompt):
+                yield chunk.content
+            
+            # Add sources at the end
+            yield "\n\n"
+            yield self._format_sources(relevant_chunks)
             
         except Exception as e:
-            print(f"Error clearing database: {e}")
-    
+            logger.error(f"Failed to generate streaming response: {e}", exc_info=True)
+            yield f"\n\n❌ Lỗi: {str(e)}"
+
+    def _build_context(self, chunks: List[Dict]) -> str:
+        """Build context from relevant chunks"""
+        context_parts = []
+        total_length = 0
+        
+        for chunk in chunks:
+            source_info = f"[{chunk['subject']} - {chunk['file']} - Trang {chunk['page']}]"
+            chunk_text = f"{source_info}\n{chunk['text']}"
+            
+            # Check context length limit
+            if total_length + len(chunk_text) > config.retrieval.max_context_length:
+                break
+            
+            context_parts.append(chunk_text)
+            total_length += len(chunk_text)
+        
+        return "\n\n".join(context_parts)
+
+    def _build_prompt(self, context: str, question: str) -> str:
+        """Build prompt for LLM"""
+        prompt_template = """Bạn là một trợ lý AI được thiết kế để cung cấp các câu trả lời phù hợp và sâu sắc dựa trên ngữ cảnh từ nhiều tài liệu khác nhau.
+Hãy sử dụng ngữ cảnh sau để trả lời câu hỏi của người dùng:
+
+Ngữ cảnh: {context}
+
+Câu hỏi của người dùng: {question}
+
+Câu trả lời của bạn cần:
+1. Rõ ràng, ngắn gọn và dựa trực tiếp vào ngữ cảnh đã cung cấp.
+2. Bao gồm các chi tiết cụ thể từ tài liệu khi phù hợp.
+3. Nếu bạn không biết câu trả lời, hãy nói rõ.
+4. Nếu có nhiều tài liệu liên quan, hãy tổng hợp thông tin một cách mạch lạc.
+5. KHÔNG nêu nguồn trong câu trả lời - nguồn sẽ được thêm tự động.
+
+Câu trả lời của bạn:
+"""
+        return prompt_template.format(context=context, question=question)
+
+    def _format_sources(self, chunks: List[Dict]) -> str:
+        """Format sources information"""
+        seen = set()
+        sources = []
+        
+        for chunk in chunks:
+            key = (chunk['subject'], chunk['file'], chunk['page'])
+            if key not in seen:
+                seen.add(key)
+                sources.append(
+                    f"- {chunk['subject']} / {chunk['file']} / Trang {chunk['page']}"
+                )
+        
+        if sources:
+            return "📚 **Nguồn tham khảo:**\n" + "\n".join(sources)
+        return ""
+
     @staticmethod
     def get_available_subjects() -> List[str]:
-        """Get list of available subjects."""
-        data_folder = "data"
-        if not os.path.exists(data_folder):
+        """Get list of available subjects"""
+        if not os.path.exists(config.app.data_folder):
             return []
-        
-        subjects = [folder for folder in os.listdir(data_folder) 
-                   if os.path.isdir(os.path.join(data_folder, folder))]
-        return sorted(subjects)
-    
+        return [
+            folder
+            for folder in os.listdir(config.app.data_folder)
+            if os.path.isdir(os.path.join(config.app.data_folder, folder))
+        ]
+
     @staticmethod
     def get_subject_files(subject: str) -> List[str]:
-        """Get list of PDF files for a specific subject."""
-        subject_path = os.path.join("data", subject)
+        """Get list of PDF files for a subject"""
+        subject_path = os.path.join(config.app.data_folder, subject)
         if not os.path.exists(subject_path):
             return []
-        
-        pdf_files = [f for f in os.listdir(subject_path) if f.endswith('.pdf')]
-        return sorted(pdf_files)
-    
+        return [f for f in os.listdir(subject_path) if f.endswith(".pdf")]
+
     def __del__(self):
-        """Cleanup Qdrant client."""
+        """Cleanup resources"""
         try:
-            if hasattr(self, 'qdrant_client'):
+            if hasattr(self, "qdrant_client"):
                 self.qdrant_client.close()
-        except:
-            pass
+                logger.info("🔒 Qdrant client closed")
+        except Exception as e:
+            logger.error(f"Error closing Qdrant client: {e}")
