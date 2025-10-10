@@ -20,3 +20,6 @@ models/
 vectordb/
 test/
 *.log
+src/app.py
+
+
