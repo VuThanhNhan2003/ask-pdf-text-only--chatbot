@@ -9,13 +9,13 @@ from sqlalchemy.pool import StaticPool
 from .models import Base
 
 # Database URL from environment
-# DATABASE_URL = os.getenv(
-#     "DATABASE_URL",
-#     "sqlite:///./chatbot.db"  # Default to SQLite for development
-# )
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "sqlite:///./chatbot.db"  # Default to SQLite for development
+)
 
 # For PostgreSQL in production:
-DATABASE_URL = "postgresql://user:password@postgres:5432/chatbot_db"
+# DATABASE_URL = "postgresql://user:password@postgres:5432/chatbot_db"
 
 # Engine configuration
 if DATABASE_URL.startswith("sqlite"):

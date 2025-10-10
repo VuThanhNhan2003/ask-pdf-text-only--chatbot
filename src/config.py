@@ -1,22 +1,26 @@
 """
 Configuration management for RAG Chatbot
-Centralized settings for easy maintenance
+Centralized settings with absolute paths
 """
 import os
 from dataclasses import dataclass
 from typing import Optional
 from dotenv import load_dotenv
+from pathlib import Path
 
 load_dotenv()
+
+# Get the project root directory (parent of src/)
+PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 
 
 @dataclass
 class EmbeddingConfig:
     """Embedding model configuration"""
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
-    local_path: str = "models/all-MiniLM-L6-v2"
+    local_path: str = str(PROJECT_ROOT / "models" / "all-MiniLM-L6-v2")
     batch_size: int = 32
-    cache_folder: str = "models"
+    cache_folder: str = str(PROJECT_ROOT / "models")
 
 
 @dataclass
@@ -79,8 +83,8 @@ class RetrievalConfig:
 @dataclass
 class AppConfig:
     """Application configuration"""
-    data_folder: str = "data"
-    log_folder: str = "logs"
+    data_folder: str = str(PROJECT_ROOT / "data")
+    log_folder: str = str(PROJECT_ROOT / "logs")
     page_title: str = "RAG Chatbot"
     page_icon: str = "🤖"
     
@@ -116,6 +120,14 @@ class Config:
         except Exception as e:
             print(f"❌ Configuration validation failed: {e}")
             return False
+    
+    def print_paths(self):
+        """Debug: print all paths"""
+        print(f"📂 PROJECT_ROOT: {PROJECT_ROOT}")
+        print(f"📂 Data folder: {self.app.data_folder}")
+        print(f"📂 Log folder: {self.app.log_folder}")
+        print(f"📂 Model cache: {self.embedding.cache_folder}")
+        print(f"📂 Model path: {self.embedding.local_path}")
 
 
 # Global config instance

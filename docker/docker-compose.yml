@@ -62,9 +62,6 @@ services:
       PYTHONPATH: /app
       PYTHONUNBUFFERED: "1"
       
-      # # Google API Key (from .env)
-      # GOOGLE_API_KEY: ${GOOGLE_API_KEY}
-      
     volumes:
       - ../src:/app/src
       - ../database:/app/database
@@ -75,8 +72,9 @@ services:
       - ../data:/app/data
       - ../logs:/app/logs
       - hf_cache:/hf_cache
+    # FIX: Giữ working directory là /app, không phải /app/src
     command: >
-      sh -c "cd /app && streamlit run src/app_v2.py
+      sh -c "streamlit run src/app_v2.py
              --server.port=8501
              --server.address=0.0.0.0
              --server.headless=true
