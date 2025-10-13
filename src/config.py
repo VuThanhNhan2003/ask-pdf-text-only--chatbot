@@ -61,15 +61,43 @@ class ChunkingConfig:
 @dataclass
 class LLMConfig:
     """LLM configuration"""
-    model_name: str = "gemini-2.0-flash-exp"
-    temperature: float = 0.1
-    max_output_tokens: int = 2048
-    api_key: Optional[str] = None
+    # Available models
+    AVAILABLE_MODELS = {
+        "gemini": {
+            "name": "gemini-1.5-pro",
+            "type": "api",
+            "provider": "google",
+        },
+        # "llama-3.1-8b": {
+        #     "name": "meta-llama/Llama-3.1-8B-Instruct",
+        #     "type": "local",
+        #     "provider": "huggingface",
+        # },
+        "Qwen2.5-3B-Instruct": {
+            "name": "Qwen/Qwen2.5-3B-Instruct",
+            "type": "local",
+            "provider": "huggingface",
+        }
+    }
     
-    def __post_init__(self):
-        self.api_key = os.getenv("GOOGLE_API_KEY")
-        if not self.api_key:
-            raise ValueError("GOOGLE_API_KEY not found in environment variables")
+    # Current model selection
+    current_model: str = os.getenv("LLM_MODEL", "gemini")
+    
+    # Model-specific configs
+    model_name: str = AVAILABLE_MODELS[current_model]["name"]
+    temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+    max_output_tokens: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "2048"))
+    api_key: str = os.getenv("GOOGLE_API_KEY", "")
+    
+    # Local model cache
+    local_models_folder: str = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "models", "llm"
+    )
+    
+    @classmethod
+    def get_model_config(cls, model_key: str) -> dict:
+        """Get configuration for specific model"""
+        return cls.AVAILABLE_MODELS.get(model_key, cls.AVAILABLE_MODELS["gemini"])
 
 
 @dataclass

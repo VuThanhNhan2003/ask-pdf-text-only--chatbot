@@ -70,6 +70,8 @@ def init_session_state():
         st.session_state.current_conversation_id = None
     if "current_subject" not in st.session_state:
         st.session_state.current_subject = None
+    if "current_model" not in st.session_state:
+        st.session_state.current_model = None
 
 
 # =====================================================================
@@ -297,22 +299,65 @@ def main():
         )
         
         st.divider()
+        
+        # ============================================================
+        # MODEL SELECTOR
+        # ============================================================
+        st.header("🤖 Chọn AI Model")
+        
+        # Get available models
+        available_models = RAGProcessor.get_available_llm_models()
+        
+        # Create user-friendly model options
+        model_options = {}
+        for key, info in available_models.items():
+            display_name = f"{info['name']}"
+            if info['type'] == 'local':
+                display_name += " 🖥️ (Local)"
+            else:
+                display_name += " ☁️ (API)"
+            model_options[display_name] = key
+        
+        selected_model_display = st.selectbox(
+            "Model:",
+            options=list(model_options.keys()),
+            key="model_selector",
+            help="Chọn model AI để xử lý câu hỏi. Local models chạy trên server, API models sử dụng dịch vụ cloud."
+        )
+        
+        selected_model = model_options[selected_model_display]
+        
+        # Show model info
+        model_info = available_models[selected_model]
+        with st.expander("ℹ️ Thông tin model"):
+            st.write(f"**Tên:** {model_info['name']}")
+            st.write(f"**Loại:** {model_info['type']}")
+            st.write(f"**Provider:** {model_info['provider']}")
+        
+        st.divider()
     
     # Initialize processor if needed
     needs_new_processor = (
         st.session_state.processor is None or
-        st.session_state.current_subject != selected_subject
+        st.session_state.current_subject != selected_subject or
+        st.session_state.current_model != selected_model
     )
     
     if needs_new_processor:
-        with st.spinner("Đang khởi tạo processor..."):
+        with st.spinner(f"Đang khởi tạo processor với model {selected_model}..."):
             try:
                 subject_filter = None if selected_subject == "Tất cả môn học" else selected_subject
-                st.session_state.processor = RAGProcessor(subject_filter)
+                st.session_state.processor = RAGProcessor(
+                    subject=subject_filter,
+                    llm_model=selected_model
+                )
                 st.session_state.current_subject = selected_subject
-                logger.info(f"Processor initialized for: {selected_subject}")
+                st.session_state.current_model = selected_model
+                logger.info(f"Processor initialized - Subject: {selected_subject}, Model: {selected_model}")
+                st.success(f"✅ Đã tải model: {selected_model}")
             except Exception as e:
                 st.error(f"❌ Lỗi khởi tạo: {e}")
+                logger.error(f"Failed to initialize processor: {e}", exc_info=True)
                 st.stop()
     
     # Render conversations sidebar
@@ -324,11 +369,12 @@ def main():
     # Render main chat interface
     render_chat_interface(user_id, selected_subject)
     
-    # Footer
+    # Footer with model info
     st.markdown("---")
+    current_model_info = available_models.get(st.session_state.current_model, {})
     st.markdown(
         "<div style='text-align: center; color: #666;'>"
-        "🤖 RAG Chatbot với Streamlit + Qdrant + Gemini | "
+        f"🤖 RAG Chatbot | Model: {current_model_info.get('name', 'Unknown')} | "
         f"📝 Logs: {config.app.log_folder}/"
         "</div>",
         unsafe_allow_html=True

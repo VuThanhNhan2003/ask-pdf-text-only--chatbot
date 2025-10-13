@@ -16,6 +16,8 @@ qdrant-client==1.15.1
 torch==2.8.0+cpu
 transformers==4.56.0
 
+accelerate>=0.20.0
+
 # PDF Processing
 pymupdf
 pymupdf4llm==0.0.27
@@ -38,5 +40,7 @@ bcrypt==4.2.1
 # Development (optional)
 # pytest==8.3.4
 # pytest-asyncio==0.24.0
+
+
 
 --extra-index-url https://download.pytorch.org/whl/cpu

@@ -23,6 +23,7 @@ from qdrant_client.models import (
 from sentence_transformers import SentenceTransformer
 
 from config import config
+from llm_manager import LLMManager
 
 
 # =====================================================================
@@ -136,9 +137,9 @@ def get_embedding_model() -> SentenceTransformer:
 class RAGProcessor:
     """Optimized RAG Processor with streaming support"""
     
-    def __init__(self, subject: Optional[str] = None):
+    def __init__(self, subject: Optional[str] = None, llm_model: Optional[str] = None):
         """Initialize the RAG processor for a specific subject."""
-        logger.info(f"Initializing RAGProcessor for subject: {subject}")
+        logger.info(f"Initializing RAGProcessor for subject: {subject}, model: {llm_model}")
         start_time = time.time()
         
         try:
@@ -163,13 +164,9 @@ class RAGProcessor:
             self.collection_name = config.qdrant.collection_name
             self.data_folder = config.app.data_folder
             
-            # Initialize LLM
-            self.llm = ChatGoogleGenerativeAI(
-                model=config.llm.model_name,
-                temperature=config.llm.temperature,
-                max_output_tokens=config.llm.max_output_tokens,
-                google_api_key=config.llm.api_key
-            )
+            # Initialize LLM using LLMManager
+            self.llm_model_key = llm_model or config.llm.current_model
+            self.llm = LLMManager.get_llm(self.llm_model_key)
             
             # Initialize text splitter
             self.text_splitter = RecursiveCharacterTextSplitter(
@@ -461,7 +458,7 @@ class RAGProcessor:
 
     def get_response(self, query: str) -> str:
         """Get response for query (non-streaming)"""
-        logger.info(f"💬 Processing query: {query[:100]}...")
+        logger.info(f"💬 Processing query with {self.llm_model_key}: {query[:100]}...")
         start_time = time.time()
         
         try:
@@ -477,7 +474,7 @@ class RAGProcessor:
             
             # Add sources
             sources_text = self._format_sources(relevant_chunks)
-            full_response = f"{response.content}\n\n{sources_text}"
+            full_response = f"{response}\n\n{sources_text}"
             
             elapsed = time.time() - start_time
             logger.info(f"✅ Response generated in {elapsed:.2f}s")
@@ -490,7 +487,7 @@ class RAGProcessor:
 
     def get_response_stream(self, query: str) -> Generator[str, None, None]:
         """Get streaming response for query"""
-        logger.info(f"💬 Processing streaming query: {query[:100]}...")
+        logger.info(f"💬 Processing streaming query with {self.llm_model_key}: {query[:100]}...")
         
         try:
             relevant_chunks = self._retrieve_relevant_chunks(query)
@@ -503,7 +500,7 @@ class RAGProcessor:
             
             # Stream response
             for chunk in self.llm.stream(prompt):
-                yield chunk.content
+                yield chunk
             
             # Add sources at the end
             yield "\n\n"
@@ -512,6 +509,11 @@ class RAGProcessor:
         except Exception as e:
             logger.error(f"Failed to generate streaming response: {e}", exc_info=True)
             yield f"\n\n❌ Lỗi: {str(e)}"
+    
+    @staticmethod
+    def get_available_llm_models() -> Dict[str, Dict]:
+        """Get list of available LLM models"""
+        return LLMManager.list_available_models()
 
     def _build_context(self, chunks: List[Dict]) -> str:
         """Build context from relevant chunks"""
