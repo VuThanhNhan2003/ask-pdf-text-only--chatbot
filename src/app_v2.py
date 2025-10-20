@@ -209,15 +209,25 @@ def render_chat_interface(user_id: int, selected_subject: str):
             conv_subject = conv.subject
             conv_title = conv.title
     
-    # Display conversation info (using extracted data, not ORM object)
+    # Display conversation info
     st.info(f"📖 Môn học: **{conv_subject or 'Tất cả môn học'}**")
     
     # Load and display messages
     messages = load_conversation_messages(conv_id)
     
+    # Sync history with processor
+    if st.session_state.processor:
+        # Convert messages to processor history format
+        history_for_processor = []
+        for msg in messages:
+            history_for_processor.append({
+                "role": msg['role'],
+                "content": msg['content']
+            })
+        st.session_state.processor.set_history(history_for_processor)
+    
     if messages:
         for msg in messages:
-            # Use extracted data (dict) not ORM object
             avatar = "user" if msg['role'] == "user" else "assistant"
             
             with st.chat_message(avatar):
@@ -247,8 +257,8 @@ def render_chat_interface(user_id: int, selected_subject: str):
             full_response = ""
             
             try:
-                # Stream the response
-                for chunk in st.session_state.processor.get_response_stream(user_input):
+                # Stream the response (with history enabled)
+                for chunk in st.session_state.processor.get_response_stream(user_input, use_history=True):
                     full_response += chunk
                     response_placeholder.markdown(full_response)
                 

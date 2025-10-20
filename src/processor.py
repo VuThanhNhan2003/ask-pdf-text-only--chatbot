@@ -175,6 +175,10 @@ class RAGProcessor:
                 separators=config.chunking.separators,
             )
             
+            # Initialize conversation history
+            self.conversation_history: List[Dict[str, str]] = []
+            self.max_history_messages = 3  # Giữ tối đa 3 cặp hội thoại
+            
             # Ensure collection exists
             self._ensure_collection()
             
@@ -456,7 +460,79 @@ class RAGProcessor:
             logger.error(f"Failed to retrieve chunks: {e}")
             return []
 
-    def get_response(self, query: str) -> str:
+    def _add_to_history(self, role: str, content: str):
+        """Add message to conversation history"""
+        self.conversation_history.append({
+            "role": role,
+            "content": content
+        })
+        
+        # Keep only last N messages (pairs of user+assistant)
+        if len(self.conversation_history) > self.max_history_messages * 2:
+            self.conversation_history = self.conversation_history[-(self.max_history_messages * 2):]
+    
+    def clear_history(self):
+        """Clear conversation history"""
+        self.conversation_history = []
+        logger.info("🧹 Conversation history cleared")
+    
+    def set_history(self, messages: List[Dict[str, str]]):
+        """Set conversation history from external source (e.g., database)"""
+        self.conversation_history = messages[-self.max_history_messages * 2:] if messages else []
+        logger.info(f"📝 Set conversation history: {len(self.conversation_history)} messages")
+
+    def _build_prompt_with_history(self, context: str, question: str) -> str:
+        """Build prompt with conversation history"""
+        
+        # Build conversation history text
+        history_text = ""
+        if self.conversation_history:
+            history_parts = []
+            for msg in self.conversation_history:
+                role = "Người dùng" if msg["role"] == "user" else "Trợ lý AI"
+                history_parts.append(f"{role}: {msg['content']}")
+            history_text = "\n".join(history_parts)
+        
+        prompt_template = """Bạn là một trợ lý AI được thiết kế để cung cấp các câu trả lời phù hợp và sâu sắc dựa trên ngữ cảnh từ nhiều tài liệu khác nhau.
+
+{history_section}
+
+Hãy sử dụng ngữ cảnh sau để trả lời câu hỏi của người dùng:
+
+Ngữ cảnh: {context}
+
+Câu hỏi hiện tại của người dùng: {question}
+
+Câu trả lời của bạn cần:
+1. Rõ ràng, ngắn gọn và dựa trực tiếp vào ngữ cảnh đã cung cấp.
+2. Tham khảo lịch sử hội thoại nếu câu hỏi hiện tại liên quan đến câu hỏi trước.
+3. Bao gồm các chi tiết cụ thể từ tài liệu khi phù hợp.
+4. Nếu bạn không biết câu trả lời, hãy nói rõ.
+5. Nếu có nhiều tài liệu liên quan, hãy tổng hợp thông tin một cách mạch lạc.
+6. KHÔNG nêu nguồn trong câu trả lời - nguồn sẽ được thêm tự động.
+
+Câu trả lời của bạn:
+"""
+        
+        history_section = ""
+        if history_text:
+            history_section = f"""Lịch sử hội thoại trước đó:
+{history_text}
+"""
+        
+        return prompt_template.format(
+            history_section=history_section,
+            context=context,
+            question=question
+        )
+    
+        
+    @staticmethod
+    def get_available_llm_models() -> Dict[str, Dict]:
+        """Get list of available LLM models"""
+        return LLMManager.list_available_models()
+
+    def get_response(self, query: str, use_history: bool = True) -> str:
         """Get response for query (non-streaming)"""
         logger.info(f"💬 Processing query with {self.llm_model_key}: {query[:100]}...")
         start_time = time.time()
@@ -465,12 +541,26 @@ class RAGProcessor:
             relevant_chunks = self._retrieve_relevant_chunks(query)
             if not relevant_chunks:
                 logger.warning("No relevant chunks found")
-                return "❌ Không tìm thấy thông tin phù hợp trong tài liệu."
+                response = "❌ Không tìm thấy thông tin phù hợp trong tài liệu."
+                if use_history:
+                    self._add_to_history("user", query)
+                    self._add_to_history("assistant", response)
+                return response
 
             context = self._build_context(relevant_chunks)
-            prompt = self._build_prompt(context, query)
+            
+            # Use history-aware prompt
+            if use_history:
+                prompt = self._build_prompt_with_history(context, query)
+            else:
+                prompt = self._build_prompt(context, query)
             
             response = self.llm.invoke(prompt)
+            
+            # Add to history
+            if use_history:
+                self._add_to_history("user", query)
+                self._add_to_history("assistant", response)
             
             # Add sources
             sources_text = self._format_sources(relevant_chunks)
@@ -483,24 +573,44 @@ class RAGProcessor:
             
         except Exception as e:
             logger.error(f"Failed to generate response: {e}", exc_info=True)
-            return f"❌ Lỗi khi xử lý câu hỏi: {str(e)}"
+            error_response = f"❌ Lỗi khi xử lý câu hỏi: {str(e)}"
+            if use_history:
+                self._add_to_history("user", query)
+                self._add_to_history("assistant", error_response)
+            return error_response
 
-    def get_response_stream(self, query: str) -> Generator[str, None, None]:
+    def get_response_stream(self, query: str, use_history: bool = True) -> Generator[str, None, None]:
         """Get streaming response for query"""
         logger.info(f"💬 Processing streaming query with {self.llm_model_key}: {query[:100]}...")
         
         try:
             relevant_chunks = self._retrieve_relevant_chunks(query)
             if not relevant_chunks:
-                yield "❌ Không tìm thấy thông tin phù hợp trong tài liệu."
+                error_msg = "❌ Không tìm thấy thông tin phù hợp trong tài liệu."
+                if use_history:
+                    self._add_to_history("user", query)
+                    self._add_to_history("assistant", error_msg)
+                yield error_msg
                 return
 
             context = self._build_context(relevant_chunks)
-            prompt = self._build_prompt(context, query)
             
-            # Stream response
+            # Use history-aware prompt
+            if use_history:
+                prompt = self._build_prompt_with_history(context, query)
+            else:
+                prompt = self._build_prompt(context, query)
+            
+            # Stream response and collect full response
+            full_response = ""
             for chunk in self.llm.stream(prompt):
+                full_response += chunk
                 yield chunk
+            
+            # Add to history
+            if use_history:
+                self._add_to_history("user", query)
+                self._add_to_history("assistant", full_response)
             
             # Add sources at the end
             yield "\n\n"
@@ -508,12 +618,31 @@ class RAGProcessor:
             
         except Exception as e:
             logger.error(f"Failed to generate streaming response: {e}", exc_info=True)
-            yield f"\n\n❌ Lỗi: {str(e)}"
-    
-    @staticmethod
-    def get_available_llm_models() -> Dict[str, Dict]:
-        """Get list of available LLM models"""
-        return LLMManager.list_available_models()
+            error_msg = f"\n\n❌ Lỗi: {str(e)}"
+            if use_history:
+                self._add_to_history("user", query)
+                self._add_to_history("assistant", error_msg)
+            yield error_msg
+
+    def _build_prompt(self, context: str, question: str) -> str:
+        """Build prompt for LLM (without history - kept for compatibility)"""
+        prompt_template = """Bạn là một trợ lý AI được thiết kế để cung cấp các câu trả lời phù hợp và sâu sắc dựa trên ngữ cảnh từ nhiều tài liệu khác nhau.
+Hãy sử dụng ngữ cảnh sau để trả lời câu hỏi của người dùng:
+
+Ngữ cảnh: {context}
+
+Câu hỏi của người dùng: {question}
+
+Câu trả lời của bạn cần:
+1. Rõ ràng, ngắn gọn và dựa trực tiếp vào ngữ cảnh đã cung cấp.
+2. Bao gồm các chi tiết cụ thể từ tài liệu khi phù hợp.
+3. Nếu bạn không biết câu trả lời, hãy nói rõ.
+4. Nếu có nhiều tài liệu liên quan, hãy tổng hợp thông tin một cách mạch lạc.
+5. KHÔNG nêu nguồn trong câu trả lời - nguồn sẽ được thêm tự động.
+
+Câu trả lời của bạn:
+"""
+        return prompt_template.format(context=context, question=question)
 
     def _build_context(self, chunks: List[Dict]) -> str:
         """Build context from relevant chunks"""
@@ -532,26 +661,6 @@ class RAGProcessor:
             total_length += len(chunk_text)
         
         return "\n\n".join(context_parts)
-
-    def _build_prompt(self, context: str, question: str) -> str:
-        """Build prompt for LLM"""
-        prompt_template = """Bạn là một trợ lý AI được thiết kế để cung cấp các câu trả lời phù hợp và sâu sắc dựa trên ngữ cảnh từ nhiều tài liệu khác nhau.
-Hãy sử dụng ngữ cảnh sau để trả lời câu hỏi của người dùng:
-
-Ngữ cảnh: {context}
-
-Câu hỏi của người dùng: {question}
-
-Câu trả lời của bạn cần:
-1. Rõ ràng, ngắn gọn và dựa trực tiếp vào ngữ cảnh đã cung cấp.
-2. Bao gồm các chi tiết cụ thể từ tài liệu khi phù hợp.
-3. Nếu bạn không biết câu trả lời, hãy nói rõ.
-4. Nếu có nhiều tài liệu liên quan, hãy tổng hợp thông tin một cách mạch lạc.
-5. KHÔNG nêu nguồn trong câu trả lời - nguồn sẽ được thêm tự động.
-
-Câu trả lời của bạn:
-"""
-        return prompt_template.format(context=context, question=question)
 
     def _format_sources(self, chunks: List[Dict]) -> str:
         """Format sources information"""

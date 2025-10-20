@@ -64,7 +64,7 @@ class LLMConfig:
     # Available models
     AVAILABLE_MODELS = {
         "gemini": {
-            "name": "gemini-1.5-pro",
+            "name": "gemini-2.0-flash",
             "type": "api",
             "provider": "google",
         },
