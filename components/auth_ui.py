@@ -28,7 +28,7 @@ def logout():
 
 def render_login_form():
     """Render login form"""
-    st.title("🔐 Đăng nhập")
+    st.title("🔐 Đăng nhập dev")
     
     with st.form("login_form"):
         email = st.text_input("Email", placeholder="your@email.com")
