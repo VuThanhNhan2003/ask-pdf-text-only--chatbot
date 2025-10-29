@@ -16,7 +16,6 @@ qdrant-client==1.15.1
 torch==2.8.0+cpu
 transformers==4.56.0
 
-accelerate>=0.20.0
 
 # PDF Processing
 pymupdf
