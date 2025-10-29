@@ -487,103 +487,101 @@ class RAGProcessor:
         logger.info(f"📝 Set conversation history: {len(self.conversation_history)} messages")
     
     def _build_prompt(self, context: str, question: str, use_history: bool = True) -> str:
-    """
-    Build prompt for LLM with optional conversation history
-    
-    Args:
-        context: Retrieved context from documents
-        question: User's question
-        use_history: Whether to include conversation history
-    """
-    
-    # Build history section if needed
-    history_section = ""
-    if use_history and self.conversation_history:
-        history_parts = []
-        for msg in self.conversation_history:
-            role = "Người dùng" if msg["role"] == "user" else "Trợ lý AI"
-            history_parts.append(f"{role}: {msg['content']}")
+        """
+        Build prompt for LLM with optional conversation history
         
-        history_text = "\n".join(history_parts)
-        history_section = f"""Lịch sử hội thoại trước đó:
-{history_text}
+        Args:
+            context: Retrieved context from documents
+            question: User's question
+            use_history: Whether to include conversation history
+        """
+        
+        # Build history section if needed
+        history_section = ""
+        if use_history and self.conversation_history:
+            history_parts = []
+            for msg in self.conversation_history:
+                role = "Người dùng" if msg["role"] == "user" else "Trợ lý AI"
+                history_parts.append(f"{role}: {msg['content']}")
+            
+            history_text = "\n".join(history_parts)
+            history_section = f"""Lịch sử hội thoại trước đó:
+    {history_text}
 
-"""
-    
-    prompt_template = """Bạn là một trợ lý AI được thiết kế để cung cấp các câu trả lời phù hợp và sâu sắc dựa trên ngữ cảnh từ nhiều tài liệu khác nhau.
+    """
+        
+        prompt_template = """Bạn là một trợ lý AI được thiết kế để cung cấp các câu trả lời phù hợp và sâu sắc dựa trên ngữ cảnh từ nhiều tài liệu khác nhau.
 
-{history_section}Hãy sử dụng ngữ cảnh sau để trả lời câu hỏi của người dùng:
+    {history_section}Hãy sử dụng ngữ cảnh sau để trả lời câu hỏi của người dùng:
 
-Ngữ cảnh: {context}
+    Ngữ cảnh: {context}
 
-Câu hỏi{question_label}: {question}
+    Câu hỏi{question_label}: {question}
 
-Câu trả lời của bạn cần:
-1. Rõ ràng, ngắn gọn và dựa trực tiếp vào ngữ cảnh đã cung cấp.
-{history_instruction}2. Bao gồm các chi tiết cụ thể từ tài liệu khi phù hợp.
-3. Nếu bạn không biết câu trả lời, hãy nói rõ.
-4. Nếu có nhiều tài liệu liên quan, hãy tổng hợp thông tin một cách mạch lạc.
-5. KHÔNG nêu nguồn trong câu trả lời - nguồn sẽ được thêm tự động.
+    Câu trả lời của bạn cần:
+    1. Rõ ràng, ngắn gọn và dựa trực tiếp vào ngữ cảnh đã cung cấp.
+    {history_instruction}2. Bao gồm các chi tiết cụ thể từ tài liệu khi phù hợp.
+    3. Nếu bạn không biết câu trả lời, hãy nói rõ.
+    4. Nếu có nhiều tài liệu liên quan, hãy tổng hợp thông tin một cách mạch lạc.
+    5. KHÔNG nêu nguồn trong câu trả lời - nguồn sẽ được thêm tự động.
 
-Câu trả lời của bạn:
-"""
-    
-    # Dynamic text based on history usage
-    question_label = " hiện tại của người dùng" if use_history else " của người dùng"
-    history_instruction = "2. Tham khảo lịch sử hội thoại nếu câu hỏi hiện tại liên quan đến câu hỏi trước.\n" if use_history else ""
-    
-    return prompt_template.format(
-        history_section=history_section,
-        context=context,
-        question=question,
-        question_label=question_label,
-        history_instruction=history_instruction
-    )
+    Câu trả lời của bạn:
+    """
+        
+        # Dynamic text based on history usage
+        question_label = " hiện tại của người dùng" if use_history else " của người dùng"
+        history_instruction = "2. Tham khảo lịch sử hội thoại nếu câu hỏi hiện tại liên quan đến câu hỏi trước.\n" if use_history else ""
+        
+        return prompt_template.format(
+            history_section=history_section,
+            context=context,
+            question=question,
+            question_label=question_label,
+            history_instruction=history_instruction
+        )
 
+    # Cập nhật các phương thức gọi:
+    def get_response(self, query: str, use_history: bool = True) -> str:
+        """Get response for query (non-streaming)"""
+        logger.info(f"💬 Processing query with {self.llm_model_key}: {query[:100]}...")
+        start_time = time.time()
+        
+        try:
+            relevant_chunks = self._retrieve_relevant_chunks(query)
+            if not relevant_chunks:
+                logger.warning("No relevant chunks found")
+                response = "❌ Không tìm thấy thông tin phù hợp trong tài liệu."
+                if use_history:
+                    self._add_to_history("user", query)
+                    self._add_to_history("assistant", response)
+                return response
 
-# Cập nhật các phương thức gọi:
-
-def get_response(self, query: str, use_history: bool = True) -> str:
-    """Get response for query (non-streaming)"""
-    logger.info(f"💬 Processing query with {self.llm_model_key}: {query[:100]}...")
-    start_time = time.time()
-    
-    try:
-        relevant_chunks = self._retrieve_relevant_chunks(query)
-        if not relevant_chunks:
-            logger.warning("No relevant chunks found")
-            response = "❌ Không tìm thấy thông tin phù hợp trong tài liệu."
+            context = self._build_context(relevant_chunks)
+            prompt = self._build_prompt(context, query, use_history=use_history)
+            
+            response = self.llm.invoke(prompt)
+            
+            # Add to history
             if use_history:
                 self._add_to_history("user", query)
                 self._add_to_history("assistant", response)
-            return response
-
-        context = self._build_context(relevant_chunks)
-        prompt = self._build_prompt(context, query, use_history=use_history)
-        
-        response = self.llm.invoke(prompt)
-        
-        # Add to history
-        if use_history:
-            self._add_to_history("user", query)
-            self._add_to_history("assistant", response)
-        
-        # Add sources
-        sources_text = self._format_sources(relevant_chunks)
-        full_response = f"{response}\n\n{sources_text}"
-        
-        elapsed = time.time() - start_time
-        logger.info(f"✅ Response generated in {elapsed:.2f}s")
-        
-        return full_response
-        
-    except Exception as e:
-        logger.error(f"Failed to generate response: {e}", exc_info=True)
-        error_response = f"❌ Lỗi khi xử lý câu hỏi: {str(e)}"
-        if use_history:
-            self._add_to_history("user", query)
-            self._add_to_history("assistant", error_response)
-        return error_response
+            
+            # Add sources
+            sources_text = self._format_sources(relevant_chunks)
+            full_response = f"{response}\n\n{sources_text}"
+            
+            elapsed = time.time() - start_time
+            logger.info(f"✅ Response generated in {elapsed:.2f}s")
+            
+            return full_response
+            
+        except Exception as e:
+            logger.error(f"Failed to generate response: {e}", exc_info=True)
+            error_response = f"❌ Lỗi khi xử lý câu hỏi: {str(e)}"
+            if use_history:
+                self._add_to_history("user", query)
+                self._add_to_history("assistant", error_response)
+            return error_response
 
 
 def get_response_stream(self, query: str, use_history: bool = True) -> Generator[str, None, None]:
