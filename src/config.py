@@ -1,6 +1,6 @@
 """
 Configuration management for RAG Chatbot
-Centralized settings with absolute paths
+Centralized settings with absolute paths + GGUF support
 """
 import os
 from dataclasses import dataclass
@@ -60,7 +60,7 @@ class ChunkingConfig:
 
 @dataclass
 class LLMConfig:
-    """LLM configuration"""
+    """LLM configuration with GGUF support"""
     # Available models
     AVAILABLE_MODELS = {
         "gemini": {
@@ -68,31 +68,46 @@ class LLMConfig:
             "type": "api",
             "provider": "google",
         },
-        # "llama-3.1-8b": {
-        #     "name": "meta-llama/Llama-3.1-8B-Instruct",
+        # GGUF Models - Optimized for CPU
+        "qwen2.5-3b-q4": {
+            "name": "Qwen2.5-3B-Instruct-Q4_K_M.gguf",
+            "type": "gguf",
+            "provider": "llama.cpp",
+            "repo": "Qwen/Qwen2.5-3B-Instruct-GGUF",
+            "file": "qwen2.5-3b-instruct-q4_k_m.gguf",
+            "description": "4-bit quantization, cân bằng tốc độ/chất lượng"
+        },
+        # "qwen2.5-3b-q5": {
+        #     "name": "Qwen2.5-3B-Instruct-Q5_K_M.gguf",
+        #     "type": "gguf",
+        #     "provider": "llama.cpp",
+        #     "repo": "Qwen/Qwen2.5-3B-Instruct-GGUF",
+        #     "file": "qwen2.5-3b-instruct-q5_k_m.gguf",
+        #     "description": "5-bit quantization, chất lượng cao hơn"
+        # },
+        # Legacy HuggingFace (giữ lại nếu cần)
+        # "Qwen2.5-3B-Instruct": {
+        #     "name": "Qwen/Qwen2.5-3B-Instruct",
         #     "type": "local",
         #     "provider": "huggingface",
-        # },
-        "Qwen2.5-3B-Instruct": {
-            "name": "Qwen/Qwen2.5-3B-Instruct",
-            "type": "local",
-            "provider": "huggingface",
-        }
+        # }
     }
     
     # Current model selection
-    current_model: str = os.getenv("LLM_MODEL", "gemini")
+    current_model: str = os.getenv("LLM_MODEL", "qwen2.5-3b-q4")
     
     # Model-specific configs
-    model_name: str = AVAILABLE_MODELS[current_model]["name"]
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-    max_output_tokens: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "2048"))
+    max_output_tokens: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1024"))  # Giảm xuống cho nhanh hơn
     api_key: str = os.getenv("GOOGLE_API_KEY", "")
     
-    # Local model cache
-    local_models_folder: str = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "models", "llm"
-    )
+    # GGUF models cache
+    gguf_models_folder: str = str(PROJECT_ROOT / "models" / "gguf")
+    
+    # llama.cpp settings
+    n_ctx: int = 4096  # Context window
+    n_threads: int = int(os.getenv("LLAMA_THREADS", "4"))  # CPU threads
+    n_gpu_layers: int = 0  # CPU only
     
     @classmethod
     def get_model_config(cls, model_key: str) -> dict:
@@ -103,9 +118,9 @@ class LLMConfig:
 @dataclass
 class RetrievalConfig:
     """Retrieval configuration"""
-    top_k: int = 5
+    top_k: int = 3  # Giảm từ 5 xuống 3 cho nhanh hơn
     score_threshold: float = 0.3
-    max_context_length: int = 4000
+    max_context_length: int = 3000  # Giảm từ 4000 xuống 3000
 
 
 @dataclass
@@ -135,8 +150,10 @@ class Config:
     def validate(self) -> bool:
         """Validate configuration"""
         try:
-            # Check API key
-            if not self.llm.api_key:
+            # Check API key (chỉ cần nếu dùng API model)
+            current_model = self.llm.get_model_config(self.llm.current_model)
+            if current_model["type"] == "api" and not self.llm.api_key:
+                print("⚠️ API key required for API models")
                 return False
             
             # Check data folder
@@ -155,7 +172,7 @@ class Config:
         print(f"📂 Data folder: {self.app.data_folder}")
         print(f"📂 Log folder: {self.app.log_folder}")
         print(f"📂 Model cache: {self.embedding.cache_folder}")
-        print(f"📂 Model path: {self.embedding.local_path}")
+        print(f"📂 GGUF models: {self.llm.gguf_models_folder}")
 
 
 # Global config instance

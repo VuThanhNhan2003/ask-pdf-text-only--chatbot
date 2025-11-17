@@ -1,5 +1,5 @@
 """
-LLM Model Manager - Handles multiple LLM models (API and Local)
+LLM Model Manager - Handles multiple LLM models (API, Local, GGUF)
 """
 import logging
 import os
@@ -9,6 +9,9 @@ from abc import ABC, abstractmethod
 from langchain_google_genai import ChatGoogleGenerativeAI
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import torch
+
+# NEW: llama.cpp for GGUF
+from llama_cpp import Llama
 
 from config import config
 
@@ -50,7 +53,7 @@ class GeminiLLM(BaseLLM):
 
 
 class HuggingFaceLLM(BaseLLM):
-    """Local HuggingFace model LLM"""
+    """Local HuggingFace model LLM (Legacy - chậm)"""
     
     def __init__(self, model_name: str, temperature: float, max_tokens: int):
         logger.info(f"Loading local model: {model_name}")
@@ -126,6 +129,91 @@ class HuggingFaceLLM(BaseLLM):
             yield response[i:i + chunk_size]
 
 
+class GGUFLLM(BaseLLM):
+    """
+    llama.cpp GGUF model LLM - Optimized for CPU
+    Nhanh hơn 3-10x so với HuggingFace transformers
+    """
+    
+    def __init__(self, model_config: dict, temperature: float, max_tokens: int):
+        logger.info(f"Loading GGUF model: {model_config['name']}")
+        
+        # Create models folder
+        os.makedirs(config.llm.gguf_models_folder, exist_ok=True)
+        
+        # Model path
+        model_filename = model_config.get("file", model_config["name"])
+        model_path = os.path.join(config.llm.gguf_models_folder, model_filename)
+        
+        # Download model if not exists
+        if not os.path.exists(model_path):
+            logger.info(f"📥 Downloading GGUF model from HuggingFace...")
+            logger.info(f"Repo: {model_config['repo']}, File: {model_filename}")
+            
+            try:
+                from huggingface_hub import hf_hub_download
+                
+                model_path = hf_hub_download(
+                    repo_id=model_config["repo"],
+                    filename=model_filename,
+                    local_dir=config.llm.gguf_models_folder,
+                    local_dir_use_symlinks=False
+                )
+                logger.info(f"✅ Model downloaded to {model_path}")
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to download model: {e}")
+                raise RuntimeError(
+                    f"Failed to download GGUF model. Please download manually:\n"
+                    f"Repo: {model_config['repo']}\n"
+                    f"File: {model_filename}\n"
+                    f"Save to: {config.llm.gguf_models_folder}"
+                )
+        
+        # Initialize llama.cpp
+        logger.info(f"Loading model from {model_path}")
+        self.llm = Llama(
+            model_path=model_path,
+            n_ctx=config.llm.n_ctx,
+            n_threads=config.llm.n_threads,
+            n_gpu_layers=config.llm.n_gpu_layers,
+            verbose=False
+        )
+        
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        
+        logger.info(f"✅ GGUF model loaded successfully")
+        logger.info(f"Config: n_ctx={config.llm.n_ctx}, n_threads={config.llm.n_threads}")
+    
+    def invoke(self, prompt: str) -> str:
+        """Generate complete response"""
+        response = self.llm(
+            prompt,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            stop=["User:", "###"],  # Stop sequences
+            echo=False
+        )
+        
+        return response["choices"][0]["text"].strip()
+    
+    def stream(self, prompt: str) -> Generator[str, None, None]:
+        """Stream response token by token"""
+        stream = self.llm(
+            prompt,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            stop=["User:", "###"],
+            echo=False,
+            stream=True
+        )
+        
+        for output in stream:
+            text = output["choices"][0]["text"]
+            yield text
+
+
 class LLMManager:
     """Manages multiple LLM models"""
     
@@ -155,7 +243,16 @@ class LLMManager:
             else:
                 raise ValueError(f"Unsupported API provider: {model_config['provider']}")
         
+        elif model_config["type"] == "gguf":
+            # NEW: GGUF model via llama.cpp
+            llm = GGUFLLM(
+                model_config=model_config,
+                temperature=config.llm.temperature,
+                max_tokens=config.llm.max_output_tokens
+            )
+        
         elif model_config["type"] == "local":
+            # Legacy HuggingFace
             if model_config["provider"] == "huggingface":
                 llm = HuggingFaceLLM(
                     model_name=model_config["name"],

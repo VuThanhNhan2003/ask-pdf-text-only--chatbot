@@ -18,6 +18,10 @@ transformers==4.56.0
 
 accelerate>=0.20.0
 
+# NEW: llama.cpp for efficient local inference
+llama-cpp-python==0.3.2
+huggingface_hub
+
 # PDF Processing
 pymupdf
 pymupdf4llm==0.0.27

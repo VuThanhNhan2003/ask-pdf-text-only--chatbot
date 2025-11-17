@@ -53,10 +53,18 @@ services:
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: documents
       
-      # Model
+      # Embedding Model
       MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2
       MODEL_DIR: /app/models
       HF_HOME: /hf_cache
+      
+      # LLM Model (GGUF)
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5-3b-q4}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.7}
+      LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-1024}
+      
+      # llama.cpp optimization
+      LLAMA_THREADS: ${LLAMA_THREADS:-4}
       
       # Python
       PYTHONPATH: /app
@@ -72,7 +80,8 @@ services:
       - ../data:/app/data
       - ../logs:/app/logs
       - hf_cache:/hf_cache
-    # FIX: Giữ working directory là /app, không phải /app/src
+      # IMPORTANT: Mount GGUF models để persistent
+      - gguf_models:/app/models/gguf
     command: >
       sh -c "streamlit run src/app_v2.py
              --server.port=8501
@@ -87,8 +96,15 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    # Optional: Giới hạn resources
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '4'
+    #       memory: 8G
 
 volumes:
   postgres_data:
   qdrant_data:
   hf_cache:
+  gguf_models:  # NEW: Volume cho GGUF models
