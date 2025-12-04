@@ -98,7 +98,7 @@ class LLMConfig:
     
     # Model-specific configs
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-    max_output_tokens: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1024"))  # Giảm xuống cho nhanh hơn
+    max_output_tokens: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "512"))  # Giảm xuống cho nhanh hơn
     api_key: str = os.getenv("GOOGLE_API_KEY", "")
     
     # GGUF models cache

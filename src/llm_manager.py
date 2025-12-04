@@ -183,29 +183,79 @@ class GGUFLLM(BaseLLM):
         self.temperature = temperature
         self.max_tokens = max_tokens
         
+        # Detect model type for proper formatting
+        self.model_name = model_config.get("name", "").lower()
+        self.is_qwen = "qwen" in self.model_name
+        
         logger.info(f"✅ GGUF model loaded successfully")
         logger.info(f"Config: n_ctx={config.llm.n_ctx}, n_threads={config.llm.n_threads}")
+        logger.info(f"Model type: {'Qwen' if self.is_qwen else 'Generic'}")
+    
+    def _format_prompt(self, prompt: str) -> str:
+        """Format prompt according to model's chat template"""
+        if self.is_qwen:
+            # Qwen chat template: <|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n
+            formatted = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+            return formatted
+        else:
+            # Generic format
+            return prompt
     
     def invoke(self, prompt: str) -> str:
         """Generate complete response"""
+        # Format prompt for model
+        formatted_prompt = self._format_prompt(prompt)
+        
         response = self.llm(
-            prompt,
+            formatted_prompt,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
-            stop=["User:", "###"],  # Stop sequences
-            echo=False
+            # CRITICAL: Stop sequences cho Qwen models
+            stop=[
+                "\n\nCâu hỏi:",
+                "\nCâu hỏi:",
+                "\n\nNgười dùng:",
+                "\nNgười dùng:",
+                "User:",
+                "\nUser:",
+                "###",
+                "<|endoftext|>",
+                "<|im_end|>",
+                "<|im_start|>",
+            ],
+            echo=False,
+            repeat_penalty=1.1,  # Penalize repetition
+            top_p=0.9,  # Nucleus sampling
+            top_k=40,  # Top-k sampling
         )
         
         return response["choices"][0]["text"].strip()
     
     def stream(self, prompt: str) -> Generator[str, None, None]:
         """Stream response token by token"""
+        # Format prompt for model
+        formatted_prompt = self._format_prompt(prompt)
+        
         stream = self.llm(
-            prompt,
+            formatted_prompt,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
-            stop=["User:", "###"],
+            stop=[
+                "\n\nCâu hỏi:",
+                "\nCâu hỏi:",
+                "\n\nNgười dùng:",
+                "\nNgười dùng:",
+                "User:",
+                "\nUser:",
+                "###",
+                "<|endoftext|>",
+                "<|im_end|>",
+                "<|im_start|>",
+            ],
             echo=False,
+            repeat_penalty=1.1,
+            top_p=0.9,
+            top_k=40,
             stream=True
         )
         

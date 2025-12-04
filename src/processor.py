@@ -506,27 +506,27 @@ class RAGProcessor:
             
             history_text = "\n".join(history_parts)
             history_section = f"""Lịch sử hội thoại trước đó:
-{history_text}
+        {history_text}
 
-"""
+    """
         
         prompt_template = """Bạn là một trợ lý AI được thiết kế để cung cấp các câu trả lời phù hợp và sâu sắc dựa trên ngữ cảnh từ nhiều tài liệu khác nhau.
 
-{history_section}Hãy sử dụng ngữ cảnh sau để trả lời câu hỏi của người dùng:
+    {history_section}Hãy sử dụng ngữ cảnh sau để trả lời câu hỏi của người dùng:
 
-Ngữ cảnh: {context}
+    Ngữ cảnh: {context}
 
-Câu hỏi{question_label}: {question}
+    Câu hỏi{question_label}: {question}
 
-Câu trả lời của bạn cần:
-1. Rõ ràng, ngắn gọn và dựa trực tiếp vào ngữ cảnh đã cung cấp.
-{history_instruction}2. Bao gồm các chi tiết cụ thể từ tài liệu khi phù hợp.
-3. Nếu bạn không biết câu trả lời, hãy nói rõ.
-4. Nếu có nhiều tài liệu liên quan, hãy tổng hợp thông tin một cách mạch lạc.
-5. KHÔNG nêu nguồn trong câu trả lời - nguồn sẽ được thêm tự động.
+    Câu trả lời của bạn cần:
+    1. Rõ ràng, ngắn gọn và dựa trực tiếp vào ngữ cảnh đã cung cấp.
+    {history_instruction}2. Bao gồm các chi tiết cụ thể từ tài liệu khi phù hợp.
+    3. Nếu bạn không biết câu trả lời, hãy nói rõ.
+    4. Nếu có nhiều tài liệu liên quan, hãy tổng hợp thông tin một cách mạch lạc.
+    5. KHÔNG nêu nguồn trong câu trả lời - nguồn sẽ được thêm tự động.
 
-Câu trả lời của bạn:
-"""
+    Câu trả lời của bạn:
+    """
         
         # Dynamic text based on history usage
         question_label = " hiện tại của người dùng" if use_history else " của người dùng"
@@ -540,6 +540,7 @@ Câu trả lời của bạn:
             history_instruction=history_instruction
         )
 
+    # Cập nhật các phương thức gọi:
     def get_response(self, query: str, use_history: bool = True) -> str:
         """Get response for query (non-streaming)"""
         logger.info(f"💬 Processing query with {self.llm_model_key}: {query[:100]}...")
@@ -582,6 +583,7 @@ Câu trả lời của bạn:
                 self._add_to_history("assistant", error_response)
             return error_response
 
+
     def get_response_stream(self, query: str, use_history: bool = True) -> Generator[str, None, None]:
         """Get streaming response for query"""
         logger.info(f"💬 Processing streaming query with {self.llm_model_key}: {query[:100]}...")
@@ -621,6 +623,7 @@ Câu trả lời của bạn:
                 self._add_to_history("user", query)
                 self._add_to_history("assistant", error_msg)
             yield error_msg
+    
 
     def _build_context(self, chunks: List[Dict]) -> str:
         """Build context from relevant chunks"""
