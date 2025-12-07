@@ -506,7 +506,7 @@ class RAGProcessor:
             
             history_text = "\n".join(history_parts)
             history_section = f"""Lịch sử hội thoại trước đó:
-    {history_text}
+        {history_text}
 
     """
         
@@ -584,45 +584,45 @@ class RAGProcessor:
             return error_response
 
 
-def get_response_stream(self, query: str, use_history: bool = True) -> Generator[str, None, None]:
-    """Get streaming response for query"""
-    logger.info(f"💬 Processing streaming query with {self.llm_model_key}: {query[:100]}...")
-    
-    try:
-        relevant_chunks = self._retrieve_relevant_chunks(query)
-        if not relevant_chunks:
-            error_msg = "❌ Không tìm thấy thông tin phù hợp trong tài liệu."
+    def get_response_stream(self, query: str, use_history: bool = True) -> Generator[str, None, None]:
+        """Get streaming response for query"""
+        logger.info(f"💬 Processing streaming query with {self.llm_model_key}: {query[:100]}...")
+        
+        try:
+            relevant_chunks = self._retrieve_relevant_chunks(query)
+            if not relevant_chunks:
+                error_msg = "❌ Không tìm thấy thông tin phù hợp trong tài liệu."
+                if use_history:
+                    self._add_to_history("user", query)
+                    self._add_to_history("assistant", error_msg)
+                yield error_msg
+                return
+
+            context = self._build_context(relevant_chunks)
+            prompt = self._build_prompt(context, query, use_history=use_history)
+            
+            # Stream response and collect full response
+            full_response = ""
+            for chunk in self.llm.stream(prompt):
+                full_response += chunk
+                yield chunk
+            
+            # Add to history
+            if use_history:
+                self._add_to_history("user", query)
+                self._add_to_history("assistant", full_response)
+            
+            # Add sources at the end
+            yield "\n\n"
+            yield self._format_sources(relevant_chunks)
+            
+        except Exception as e:
+            logger.error(f"Failed to generate streaming response: {e}", exc_info=True)
+            error_msg = f"\n\n❌ Lỗi: {str(e)}"
             if use_history:
                 self._add_to_history("user", query)
                 self._add_to_history("assistant", error_msg)
             yield error_msg
-            return
-
-        context = self._build_context(relevant_chunks)
-        prompt = self._build_prompt(context, query, use_history=use_history)
-        
-        # Stream response and collect full response
-        full_response = ""
-        for chunk in self.llm.stream(prompt):
-            full_response += chunk
-            yield chunk
-        
-        # Add to history
-        if use_history:
-            self._add_to_history("user", query)
-            self._add_to_history("assistant", full_response)
-        
-        # Add sources at the end
-        yield "\n\n"
-        yield self._format_sources(relevant_chunks)
-        
-    except Exception as e:
-        logger.error(f"Failed to generate streaming response: {e}", exc_info=True)
-        error_msg = f"\n\n❌ Lỗi: {str(e)}"
-        if use_history:
-            self._add_to_history("user", query)
-            self._add_to_history("assistant", error_msg)
-        yield error_msg
     
 
     def _build_context(self, chunks: List[Dict]) -> str:
