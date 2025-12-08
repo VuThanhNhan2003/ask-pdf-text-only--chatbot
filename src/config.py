@@ -4,9 +4,8 @@ Centralized settings with absolute paths
 """
 import os
 from dataclasses import dataclass
-from typing import Optional
-from dotenv import load_dotenv
 from pathlib import Path
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -30,15 +29,14 @@ class QdrantConfig:
     port: int = 6333
     collection_name: str = "documents"
     timeout: int = 30
-    
+
     def __post_init__(self):
         # Allow override from environment
         self.collection_name = os.getenv("QDRANT_COLLECTION", self.collection_name)
-        
+
         # Support both Docker (qdrant) and local dev (localhost)
         qdrant_url = os.getenv("QDRANT_URL", "")
         if qdrant_url:
-            # Parse QDRANT_URL if provided (e.g., http://qdrant:6333)
             if "://" in qdrant_url:
                 parts = qdrant_url.split("://")[1].split(":")
                 self.host = parts[0]
@@ -52,7 +50,7 @@ class ChunkingConfig:
     chunk_size: int = 1000
     chunk_overlap: int = 200
     separators: list = None
-    
+
     def __post_init__(self):
         if self.separators is None:
             self.separators = ["\n\n", "\n", ". ", "! ", "? ", " ", ""]
@@ -60,40 +58,44 @@ class ChunkingConfig:
 
 @dataclass
 class LLMConfig:
-    """LLM configuration"""
-    # Available models
+    """LLM configuration with branch-safe fallback."""
     AVAILABLE_MODELS = {
         "gemini": {
             "name": "gemini-2.0-flash",
             "type": "api",
             "provider": "google",
         },
-        # "llama-3.1-8b": {
-        #     "name": "meta-llama/Llama-3.1-8B-Instruct",
-        #     "type": "local",
-        #     "provider": "huggingface",
-        # },
         "Qwen2.5-3B-Instruct": {
             "name": "Qwen/Qwen2.5-3B-Instruct",
             "type": "local",
             "provider": "huggingface",
-        }
+        },
+        # "qwen2.5-3b-q4": {
+        #     "name": "Qwen/qwen2.5-3b-q4",
+        #     "type": "local",
+        #     "provider": "huggingface",
+        # }
     }
-    
-    # Current model selection
+
     current_model: str = os.getenv("LLM_MODEL", "gemini")
-    
-    # Model-specific configs
-    model_name: str = AVAILABLE_MODELS[current_model]["name"]
-    temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-    max_output_tokens: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "2048"))
+    temperature: float = float(os.getenv("LLM_TEMPERATURE", 0.7))
+    max_output_tokens: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", 2048))
     api_key: str = os.getenv("GOOGLE_API_KEY", "")
-    
-    # Local model cache
-    local_models_folder: str = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "models", "llm"
-    )
-    
+
+    # Assigned in __post_init__
+    model_name: str = None
+    local_models_folder: str = str(PROJECT_ROOT / "models" / "llm")
+
+    def __post_init__(self):
+        # Fallback nếu current_model không có trong AVAILABLE_MODELS
+        if self.current_model not in self.AVAILABLE_MODELS:
+            print(f"⚠️ Warning: LLM_MODEL '{self.current_model}' not found. Falling back to 'gemini'.")
+            self.current_model = "gemini"
+        self.model_name = self.AVAILABLE_MODELS[self.current_model]["name"]
+
+        # Debug
+        print(f"✅ Using LLM model: '{self.current_model}' -> '{self.model_name}'")
+
     @classmethod
     def get_model_config(cls, model_key: str) -> dict:
         """Get configuration for specific model"""
@@ -115,7 +117,7 @@ class AppConfig:
     log_folder: str = str(PROJECT_ROOT / "logs")
     page_title: str = "RAG Chatbot"
     page_icon: str = "🤖"
-    
+
     def __post_init__(self):
         # Ensure folders exist
         os.makedirs(self.data_folder, exist_ok=True)
@@ -128,27 +130,23 @@ class Config:
         self.embedding = EmbeddingConfig()
         self.qdrant = QdrantConfig()
         self.chunking = ChunkingConfig()
-        self.llm = LLMConfig()
+        self.llm = LLMConfig()  # Sử dụng LLMConfig thông minh
         self.retrieval = RetrievalConfig()
         self.app = AppConfig()
-    
+
     def validate(self) -> bool:
         """Validate configuration"""
         try:
-            # Check API key
             if not self.llm.api_key:
                 return False
-            
-            # Check data folder
             if not os.path.exists(self.app.data_folder):
                 print(f"⚠️ Data folder not found: {self.app.data_folder}")
                 return False
-            
             return True
         except Exception as e:
             print(f"❌ Configuration validation failed: {e}")
             return False
-    
+
     def print_paths(self):
         """Debug: print all paths"""
         print(f"📂 PROJECT_ROOT: {PROJECT_ROOT}")

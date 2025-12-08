@@ -56,6 +56,7 @@ services:
       # Model
       MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2
       MODEL_DIR: /app/models
+      LLM_MODEL: ${LLM_MODEL}
       HF_HOME: /hf_cache
       
       # Python
@@ -71,7 +72,7 @@ services:
       - ../models:/app/models
       - ../data:/app/data
       - ../logs:/app/logs
-      - hf_cache:/hf_cache
+      - hf_cache_${BRANCH_NAME-main}:/hf_cache
     # FIX: Giữ working directory là /app, không phải /app/src
     command: >
       sh -c "streamlit run src/app_v2.py
@@ -91,4 +92,5 @@ services:
 volumes:
   postgres_data:
   qdrant_data:
-  hf_cache:
+  hf_cache_main:
+  hf_cache_dev:
