@@ -7,7 +7,7 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONPATH=/app \
+    PYTHONPATH=/app/src:/app \
     HF_HOME=/hf_cache \
     TRANSFORMERS_CACHE=/hf_cache
 
