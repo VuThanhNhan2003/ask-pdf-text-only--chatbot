@@ -1,13 +1,25 @@
 ﻿from typing import Optional, Dict, Tuple
 import threading
+import json
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from processor import RAGProcessor, logger
 from config import config
 
 app = FastAPI(title="RAG Chatbot API", version="1.0.0")
+
+# Add CORS middleware for widget support
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify your domains
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Cache processors by (subject, model_key) to reuse embeddings/clients
 _processor_cache: Dict[Tuple[Optional[str], str], RAGProcessor] = {}
@@ -88,6 +100,30 @@ def reload_data(req: ReloadRequest):
     except Exception as exc:
         logger.error(f"Reload failed: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/query/stream")
+def query_stream(req: QueryRequest):
+    """Streaming endpoint for chat widget"""
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    subject = req.subject if req.subject and req.subject != "Tat ca mon hoc" else None
+    
+    def generate():
+        try:
+            processor = _get_processor(subject, req.model_key)
+            for chunk in processor.get_response_stream(req.question, use_history=req.use_history):
+                # Send chunk as JSON
+                yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+            # Send completion signal
+            yield f"data: {json.dumps({'done': True})}\n\n"
+        except Exception as exc:
+            logger.error(f"Stream query failed: {exc}", exc_info=True)
+            error_msg = json.dumps({'error': str(exc)})
+            yield f"data: {error_msg}\n\n"
+    
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":
