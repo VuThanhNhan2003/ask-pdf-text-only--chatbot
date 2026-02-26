@@ -1,55 +1,39 @@
 """
-LLM Proxy - Pull Model Architecture (Safe for Slurm)
-
-CHANGES FROM OLD VERSION:
-- ❌ NO reverse tunnels
-- ❌ NO auto-requeue
-- ✅ Workers PULL tasks from proxy
-- ✅ Task queue system
-- ✅ Fallback to Gemini when no workers
-- ✅ Safe for Slurm policies
-
-Architecture:
-1. Proxy receives user requests → Adds to queue
-2. Workers poll proxy every 30s: "Any tasks?"
-3. Proxy assigns task to worker
-4. Worker processes and returns result
-5. No workers? Use Gemini API fallback
+Lightweight LLM Proxy - Direct passthrough with retry & fallback
+Features:
+- Health check vLLM servers
+- Retry 3x on failure
+- Fallback to Gemini API
+- Streaming passthrough
+- Request logging
 """
-import asyncio
+import os
 import time
 import logging
-from typing import List, Dict, Optional
-from datetime import datetime
-from collections import deque
-import uuid
+from typing import List, Optional
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from contextlib import asynccontextmanager
 
-# ==================== LOGGING ====================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LLMProxy")
 
+# ==================== CONFIG ====================
+VLLM_SERVERS = [
+    "http://10.11.9.51:8001",  # Primary vLLM via VPN
+    # "http://10.11.9.51:8002",  # Backup (uncomment if needed)
+]
+
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+MAX_RETRIES = 3
+HEALTH_CHECK_TIMEOUT = 5
+REQUEST_TIMEOUT = 120
+
 # ==================== MODELS ====================
-class WorkerRegister(BaseModel):
-    """Worker registration (via polling)"""
-    worker_id: str
-    model_name: Optional[str] = None
-    gpu_type: Optional[str] = None
-    slurm_job_id: Optional[str] = None
-    metadata: Optional[Dict] = None
-
-
 class ChatMessage(BaseModel):
     role: str
     content: str
-
 
 class ChatCompletionRequest(BaseModel):
     model: str
@@ -58,256 +42,122 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int = 2048
     stream: bool = False
 
-
-class TaskRequest(BaseModel):
-    """Task that worker can pull"""
-    task_id: str
-    request: ChatCompletionRequest
-    created_at: float
-
-
-class TaskResult(BaseModel):
-    """Result from worker"""
-    task_id: str
-    result: Dict
-    error: Optional[str] = None
-
-
-class WorkerInfo:
-    """Worker information"""
-    def __init__(
+# ==================== VLLM MANAGER ====================
+class VLLMManager:
+    """Manage vLLM servers with health checks"""
+    
+    def __init__(self, servers: List[str]):
+        self.servers = servers
+        self.health_status = {server: True for server in servers}
+    
+    def check_health(self, server: str) -> bool:
+        """Check if vLLM server is healthy"""
+        try:
+            with httpx.Client(timeout=HEALTH_CHECK_TIMEOUT) as client:
+                response = client.get(f"{server}/health")
+                is_healthy = response.status_code == 200
+                
+                self.health_status[server] = is_healthy
+                
+                if is_healthy:
+                    logger.debug(f"✅ {server} is healthy")
+                else:
+                    logger.warning(f"⚠️ {server} unhealthy: {response.status_code}")
+                
+                return is_healthy
+                
+        except Exception as e:
+            logger.warning(f"⚠️ {server} health check failed: {e}")
+            self.health_status[server] = False
+            return False
+    
+    def get_healthy_server(self) -> Optional[str]:
+        """Get first healthy server"""
+        for server in self.servers:
+            if self.check_health(server):
+                return server
+        return None
+    
+    async def forward_to_vllm(
         self,
-        worker_id: str,
-        model_name: str,
-        gpu_type: str,
-        slurm_job_id: str,
-        metadata: Dict
+        server: str,
+        request: ChatCompletionRequest,
+        stream: bool = False
     ):
-        self.worker_id = worker_id
-        self.model_name = model_name or "unknown"
-        self.gpu_type = gpu_type or "unknown"
-        self.slurm_job_id = slurm_job_id or "unknown"
-        self.metadata = metadata or {}
+        """Forward request to vLLM server"""
         
-        self.last_heartbeat = time.time()
-        self.is_healthy = True
-        self.request_count = 0
-        self.error_count = 0
-        self.registered_at = datetime.now()
-        self.current_task_id = None  # Task currently assigned
-    
-    def mark_healthy(self):
-        self.is_healthy = True
-        self.last_heartbeat = time.time()
-    
-    def mark_unhealthy(self):
-        self.is_healthy = False
-        self.error_count += 1
-    
-    def assign_task(self, task_id: str):
-        self.current_task_id = task_id
-        self.request_count += 1
-    
-    def complete_task(self):
-        self.current_task_id = None
-    
-    def to_dict(self) -> Dict:
-        return {
-            "worker_id": self.worker_id,
-            "model_name": self.model_name,
-            "gpu_type": self.gpu_type,
-            "slurm_job_id": self.slurm_job_id,
-            "is_healthy": self.is_healthy,
-            "last_heartbeat": self.last_heartbeat,
-            "request_count": self.request_count,
-            "error_count": self.error_count,
-            "current_task": self.current_task_id,
-            "registered_at": self.registered_at.isoformat(),
-            "metadata": self.metadata
+        url = f"{server}/v1/chat/completions"
+        
+        payload = {
+            "model": request.model,
+            "messages": [msg.dict() for msg in request.messages],
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+            "stream": stream
         }
-
-
-# ==================== TASK QUEUE ====================
-class TaskQueue:
-    """Queue for pending tasks"""
-    
-    def __init__(self):
-        self.pending_tasks: Dict[str, TaskRequest] = {}
-        self.completed_tasks: Dict[str, TaskResult] = {}
-        self.task_timeout = 120  # 2 minutes
-    
-    def add_task(self, request: ChatCompletionRequest) -> str:
-        """Add new task to queue"""
-        task_id = str(uuid.uuid4())
-        task = TaskRequest(
-            task_id=task_id,
-            request=request,
-            created_at=time.time()
-        )
-        self.pending_tasks[task_id] = task
-        logger.info(f"📥 New task queued: {task_id}")
-        return task_id
-    
-    def get_next_task(self) -> Optional[TaskRequest]:
-        """Get next pending task (FIFO)"""
-        if not self.pending_tasks:
-            return None
         
-        # Get oldest task
-        task_id = next(iter(self.pending_tasks))
-        task = self.pending_tasks.pop(task_id)
-        
-        # Check if timed out
-        if time.time() - task.created_at > self.task_timeout:
-            logger.warning(f"⏱️ Task {task_id} timed out")
-            return None
-        
-        return task
-    
-    def complete_task(self, result: TaskResult):
-        """Mark task as completed"""
-        self.completed_tasks[result.task_id] = result
-        logger.info(f"✅ Task completed: {result.task_id}")
-    
-    async def wait_for_result(self, task_id: str, timeout: int = 60) -> Optional[Dict]:
-        """Wait for task result"""
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            if task_id in self.completed_tasks:
-                result = self.completed_tasks.pop(task_id)
-                
-                if result.error:
-                    raise Exception(result.error)
-                
-                return result.result
-            
-            await asyncio.sleep(0.5)
-        
-        # Timeout
-        if task_id in self.pending_tasks:
-            self.pending_tasks.pop(task_id)
-        
-        return None
-
-
-# ==================== WORKER MANAGER ====================
-class WorkerManager:
-    """Manages GPU workers with pull model"""
-    
-    def __init__(self, worker_timeout: int = 120):
-        self.workers: Dict[str, WorkerInfo] = {}
-        self.worker_timeout = worker_timeout
-        self._cleanup_task = None
-    
-    async def start(self):
-        """Start background cleanup"""
-        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
-        logger.info("✅ Worker manager started (pull model)")
-    
-    async def stop(self):
-        """Stop background tasks"""
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
-        logger.info("🛑 Worker manager stopped")
-    
-    def register_worker(self, worker: WorkerRegister) -> Dict:
-        """Register or update worker heartbeat"""
-        
-        if worker.worker_id in self.workers:
-            # Update heartbeat
-            self.workers[worker.worker_id].mark_healthy()
-            logger.debug(f"💓 Heartbeat: {worker.worker_id}")
+        if stream:
+            # Streaming response
+            return await self._stream_from_vllm(url, payload)
         else:
-            # New worker
-            worker_info = WorkerInfo(
-                worker_id=worker.worker_id,
-                model_name=worker.model_name,
-                gpu_type=worker.gpu_type,
-                slurm_job_id=worker.slurm_job_id,
-                metadata=worker.metadata
-            )
-            self.workers[worker.worker_id] = worker_info
-            logger.info(f"➕ New worker registered: {worker.worker_id} (Job: {worker.slurm_job_id})")
-        
-        return {
-            "status": "registered",
-            "worker_id": worker.worker_id,
-            "total_workers": len(self.workers)
-        }
+            # Non-streaming
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+                return response.json()
     
-    def get_healthy_workers(self) -> List[WorkerInfo]:
-        """Get list of healthy workers"""
-        return [w for w in self.workers.values() if w.is_healthy]
-    
-    def get_idle_worker(self) -> Optional[WorkerInfo]:
-        """Get idle worker (no current task)"""
-        healthy = self.get_healthy_workers()
+    async def _stream_from_vllm(self, url: str, payload: dict):
+        """Stream response from vLLM"""
         
-        for worker in healthy:
-            if worker.current_task_id is None:
-                return worker
-        
-        return None
-    
-    async def _cleanup_loop(self):
-        """Remove dead workers"""
-        while True:
+        async def generate():
             try:
-                await asyncio.sleep(30)
-                
-                current_time = time.time()
-                workers_to_remove = []
-                
-                for worker_id, worker in self.workers.items():
-                    # Remove workers with no heartbeat in timeout period
-                    if current_time - worker.last_heartbeat > self.worker_timeout:
-                        logger.warning(f"⏱️ Worker {worker_id} timeout (no heartbeat)")
-                        workers_to_remove.append(worker_id)
-                
-                for worker_id in workers_to_remove:
-                    del self.workers[worker_id]
-                
-                if workers_to_remove:
-                    logger.info(f"🧹 Cleaned up {len(workers_to_remove)} dead workers")
-                
-            except asyncio.CancelledError:
-                break
+                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                    async with client.stream("POST", url, json=payload) as response:
+                        response.raise_for_status()
+                        
+                        async for chunk in response.aiter_bytes():
+                            if chunk:
+                                yield chunk
+                                
             except Exception as e:
-                logger.error(f"❌ Cleanup error: {e}")
+                logger.error(f"Streaming error: {e}")
+                error_msg = f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+                yield error_msg.encode()
+        
+        return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 # ==================== GEMINI FALLBACK ====================
-async def fallback_to_gemini(request: ChatCompletionRequest) -> Dict:
-    """Fallback to Gemini API when no workers available"""
+async def fallback_to_gemini(request: ChatCompletionRequest):
+    """Fallback to Gemini API when vLLM unavailable"""
+    
+    if not GEMINI_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="vLLM unavailable and no Gemini API key configured"
+        )
+    
     try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        import os
-        
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise Exception("No Gemini API key configured")
-        
         logger.info("🔄 Falling back to Gemini API")
+        
+        from langchain_google_genai import ChatGoogleGenerativeAI
         
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.0-flash",
             temperature=request.temperature,
             max_output_tokens=request.max_tokens,
-            google_api_key=api_key
+            google_api_key=GEMINI_API_KEY
         )
         
         # Convert messages to prompt
-        prompt = "\n".join([f"{msg.role}: {msg.content}" for msg in request.messages])
+        prompt = "\n".join([
+            f"{msg.role}: {msg.content}" for msg in request.messages
+        ])
         
         response = llm.invoke(prompt)
         
         return {
-            "id": str(uuid.uuid4()),
+            "id": f"gemini-{int(time.time())}",
             "object": "chat.completion",
             "created": int(time.time()),
             "model": "gemini-2.0-flash",
@@ -318,154 +168,138 @@ async def fallback_to_gemini(request: ChatCompletionRequest) -> Dict:
                     "content": response.content
                 },
                 "finish_reason": "stop"
-            }]
+            }],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
         }
         
     except Exception as e:
-        logger.error(f"❌ Gemini fallback failed: {e}")
-        raise HTTPException(status_code=503, detail=f"No workers and fallback failed: {str(e)}")
+        logger.error(f"Gemini fallback failed: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Both vLLM and Gemini failed: {str(e)}"
+        )
 
 
-# ==================== GLOBAL STATE ====================
-worker_manager = WorkerManager()
-task_queue = TaskQueue()
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Startup and shutdown"""
-    logger.info("🚀 Starting LLM Proxy (Pull Model)...")
-    await worker_manager.start()
-    yield
-    logger.info("🛑 Stopping LLM Proxy...")
-    await worker_manager.stop()
-
+# ==================== FASTAPI APP ====================
+vllm_manager = VLLMManager(VLLM_SERVERS)
 
 app = FastAPI(
-    title="LLM Proxy (Pull Model)",
-    description="Safe proxy for Slurm - workers pull tasks",
-    version="2.0.0",
-    lifespan=lifespan
+    title="LLM Proxy",
+    description="Lightweight proxy with retry & fallback",
+    version="1.0.0"
 )
 
 
-# ==================== ENDPOINTS ====================
 @app.get("/")
-async def root():
-    """Root endpoint"""
-    healthy_workers = worker_manager.get_healthy_workers()
+def root():
+    """Status endpoint"""
     return {
         "status": "online",
-        "architecture": "pull_model",
-        "total_workers": len(worker_manager.workers),
-        "healthy_workers": len(healthy_workers),
-        "pending_tasks": len(task_queue.pending_tasks),
-        "workers": [w.to_dict() for w in worker_manager.workers.values()]
+        "servers": VLLM_SERVERS,
+        "health": vllm_manager.health_status
     }
 
 
 @app.get("/health")
-async def health():
+def health():
     """Health check"""
-    healthy_workers = worker_manager.get_healthy_workers()
-    return {
-        "status": "healthy",
-        "healthy_workers": len(healthy_workers),
-        "total_workers": len(worker_manager.workers),
-        "pending_tasks": len(task_queue.pending_tasks)
-    }
-
-
-@app.post("/register")
-async def register_worker(worker: WorkerRegister):
-    """
-    Worker heartbeat endpoint
-    Workers call this every 30s to stay registered
-    """
-    return worker_manager.register_worker(worker)
-
-
-@app.get("/workers")
-async def list_workers():
-    """List all workers"""
-    return {
-        "workers": [w.to_dict() for w in worker_manager.workers.values()],
-        "total": len(worker_manager.workers),
-        "healthy": len(worker_manager.get_healthy_workers())
-    }
-
-
-@app.get("/tasks/next")
-async def get_next_task():
-    """
-    Worker polls this to get next task
-    Called by worker every 30s
-    """
-    task = task_queue.get_next_task()
+    healthy_servers = [
+        s for s, h in vllm_manager.health_status.items() if h
+    ]
     
-    if task is None:
-        return {"task": None}
-    
-    # Assign to an idle worker (track who got it)
     return {
-        "task": {
-            "task_id": task.task_id,
-            "request": task.request.dict()
-        }
+        "status": "healthy" if healthy_servers else "degraded",
+        "healthy_servers": len(healthy_servers),
+        "total_servers": len(VLLM_SERVERS),
+        "servers": vllm_manager.health_status
     }
-
-
-@app.post("/tasks/complete")
-async def complete_task(result: TaskResult):
-    """Worker submits completed task"""
-    task_queue.complete_task(result)
-    return {"status": "completed"}
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
     """
-    OpenAI-compatible chat completions endpoint
+    OpenAI-compatible chat completions with retry & fallback
     
     Flow:
-    1. Add request to queue
-    2. Wait for worker to pick it up
-    3. If timeout → fallback to Gemini
+    1. Find healthy vLLM server
+    2. Try vLLM (with 3 retries)
+    3. If all fail → Fallback to Gemini
     """
     
-    # Check if we have workers
-    healthy_workers = worker_manager.get_healthy_workers()
+    logger.info(f"Request: model={request.model}, stream={request.stream}")
     
-    if len(healthy_workers) == 0:
-        logger.warning("⚠️ No workers available, using Gemini fallback")
-        return await fallback_to_gemini(request)
+    # Try vLLM with retries
+    for attempt in range(MAX_RETRIES):
+        try:
+            # Get healthy server
+            server = vllm_manager.get_healthy_server()
+            
+            if server is None:
+                logger.warning("No healthy vLLM servers available")
+                break
+            
+            # Log attempt
+            if attempt > 0:
+                logger.info(f"Retry {attempt + 1}/{MAX_RETRIES}")
+            
+            # Forward to vLLM
+            logger.info(f"→ Forwarding to {server}")
+            
+            result = await vllm_manager.forward_to_vllm(
+                server,
+                request,
+                stream=request.stream
+            )
+            
+            logger.info(f"✅ Success from {server}")
+            return result
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Attempt {attempt + 1} failed: {e}")
+            
+            # Mark server as unhealthy
+            if server:
+                vllm_manager.health_status[server] = False
+            
+            if attempt < MAX_RETRIES - 1:
+                # Wait before retry
+                await asyncio.sleep(1)
+                continue
+            else:
+                # All retries exhausted
+                logger.error("All vLLM attempts failed")
     
-    # Add to task queue
-    task_id = task_queue.add_task(request)
-    
-    logger.info(f"📋 Task queued: {task_id} (Workers: {len(healthy_workers)})")
-    
-    try:
-        # Wait for result (workers poll /tasks/next and submit result)
-        result = await task_queue.wait_for_result(task_id, timeout=60)
-        
-        if result is None:
-            logger.warning(f"⏱️ Task {task_id} timeout, falling back to Gemini")
-            return await fallback_to_gemini(request)
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"❌ Task {task_id} failed: {e}")
-        
-        # Try fallback
-        logger.info("🔄 Attempting Gemini fallback...")
-        return await fallback_to_gemini(request)
+    # Fallback to Gemini
+    logger.warning("🔄 Using Gemini fallback")
+    return await fallback_to_gemini(request)
+
+
+@app.get("/servers")
+def list_servers():
+    """List configured servers and their status"""
+    return {
+        "servers": [
+            {
+                "url": server,
+                "healthy": vllm_manager.health_status[server]
+            }
+            for server in VLLM_SERVERS
+        ]
+    }
 
 
 # ==================== RUN ====================
 if __name__ == "__main__":
     import uvicorn
+    import asyncio
+    
+    logger.info("🚀 Starting LLM Proxy (Lightweight)")
+    logger.info(f"vLLM Servers: {VLLM_SERVERS}")
+    logger.info(f"Gemini fallback: {'enabled' if GEMINI_API_KEY else 'disabled'}")
     
     uvicorn.run(
         app,
