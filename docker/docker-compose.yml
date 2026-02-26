@@ -32,7 +32,28 @@ services:
     healthcheck:
       disable: true
 
-  # Main Application
+  # LLM Proxy (NEW - Always running on CPU server)
+  llm_proxy:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.proxy
+    container_name: chatbot_llm_proxy
+    ports:
+      - "5000:5000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ../src/llm_proxy.py:/app/llm_proxy.py
+      - ../logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    command: python llm_proxy.py
+
+  # Main Application (Streamlit + RAG)
   app:
     build:
       context: ..
@@ -43,6 +64,8 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
+      llm_proxy:
+        condition: service_healthy
     env_file:
       - ../.env
     environment:
@@ -53,10 +76,13 @@ services:
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: documents
       
+      # LLM Proxy (NEW)
+      LLM_PROXY_URL: http://llm_proxy:5000
+      
       # Model
       MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2
       MODEL_DIR: /app/models
-      LLM_MODEL: ${LLM_MODEL}
+      LLM_MODEL: ${LLM_MODEL:-qwen2-7b}  # Use proxy model by default
       HF_HOME: /hf_cache
       
       # Python
@@ -73,7 +99,6 @@ services:
       - ../data:/app/data
       - ../logs:/app/logs
       - hf_cache_${BRANCH_NAME-main}:/hf_cache
-    # FIX: Giữ working directory là /app, không phải /app/src
     command: >
       sh -c "streamlit run src/app_v2.py
              --server.port=8501

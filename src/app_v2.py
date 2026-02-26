@@ -89,6 +89,12 @@ def create_new_conversation(user_id: int, subject: str):
         conv_id = conv.id  # Extract ID while session is active
         
     st.session_state.current_conversation_id = conv_id
+    
+    # Clear processor history for new conversation
+    if st.session_state.processor:
+        st.session_state.processor.clear_history()
+        logger.info(f"🧹 Cleared history for new conversation: {conv_id}")
+    
     logger.info(f"Created new conversation: {conv_id}")
     return conv_id
 
@@ -215,7 +221,7 @@ def render_chat_interface(user_id: int, selected_subject: str):
     # Load and display messages
     messages = load_conversation_messages(conv_id)
     
-    # Sync history with processor
+    # Sync history with processor (ALWAYS sync to ensure correct conversation context)
     if st.session_state.processor:
         # Convert messages to processor history format
         history_for_processor = []
@@ -225,6 +231,7 @@ def render_chat_interface(user_id: int, selected_subject: str):
                 "content": msg['content']
             })
         st.session_state.processor.set_history(history_for_processor)
+        logger.info(f"🔄 Synced history: {len(history_for_processor)} messages for conversation {conv_id}")
     
     if messages:
         for msg in messages:

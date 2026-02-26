@@ -1,14 +1,13 @@
 """
-LLM Model Manager - Handles multiple LLM models (API and Local)
+LLM Model Manager - Handles API and Remote GPU models
 """
 import logging
 import os
+import requests
 from typing import Optional, Dict, Any, Generator
 from abc import ABC, abstractmethod
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-import torch
 
 from config import config
 
@@ -49,78 +48,76 @@ class GeminiLLM(BaseLLM):
             yield chunk.content
 
 
-class HuggingFaceLLM(BaseLLM):
-    """Local HuggingFace model LLM"""
+class RemoteGPULLM(BaseLLM):
+    """Remote GPU LLM via FastAPI"""
     
-    def __init__(self, model_name: str, temperature: float, max_tokens: int):
-        logger.info(f"Loading local model: {model_name}")
-        
-        # Check if model exists locally
-        local_path = os.path.join(config.llm.local_models_folder, model_name.replace("/", "--"))
-        
-        if not os.path.exists(local_path):
-            logger.info(f"Downloading model {model_name} from HuggingFace...")
-            os.makedirs(config.llm.local_models_folder, exist_ok=True)
-            
-            # Download model and tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto" if torch.cuda.is_available() else None,
-                low_cpu_mem_usage=True
-            )
-            
-            # Save locally
-            self.tokenizer.save_pretrained(local_path)
-            self.model.save_pretrained(local_path)
-            logger.info(f"Model saved to {local_path}")
-        else:
-            logger.info(f"Loading model from {local_path}")
-            self.tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                local_path,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto" if torch.cuda.is_available() else None,
-                local_files_only=True,
-                low_cpu_mem_usage=True
-            )
-        
+    def __init__(self, api_url: str, model_key: str, temperature: float, max_tokens: int, api_key: str):
+        self.api_url = api_url.rstrip('/')
+        self.model_key = model_key
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.api_key = api_key
         
-        # Create pipeline
-        self.pipe = pipeline(
-            "text-generation",
-            model=self.model,
-            tokenizer=self.tokenizer,
-            max_new_tokens=max_tokens,
-            temperature=temperature,
-            do_sample=True if temperature > 0 else False,
-        )
-        
-        logger.info("Local model loaded successfully")
+        # Test connection
+        try:
+            response = requests.get(
+                f"{self.api_url}/",
+                headers={"X-API-Key": self.api_key},
+                timeout=10
+            )
+            response.raise_for_status()
+            logger.info(f"✅ Connected to remote LLM service: {self.api_url}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Failed to connect to remote LLM service: {e}")
+            raise ConnectionError(f"Cannot connect to LLM service at {self.api_url}. Error: {e}")
     
     def invoke(self, prompt: str) -> str:
-        messages = [{"role": "user", "content": prompt}]
-        
-        # Apply chat template if available
-        if hasattr(self.tokenizer, "apply_chat_template"):
-            formatted_prompt = self.tokenizer.apply_chat_template(
-                messages, 
-                tokenize=False, 
-                add_generation_prompt=True
+        """Generate text via API call"""
+        try:
+            logger.info(f"🌐 Calling remote LLM: {self.api_url}/generate")
+            
+            response = requests.post(
+                f"{self.api_url}/generate",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-API-Key": self.api_key
+                },
+                json={
+                    "prompt": prompt,
+                    "model_key": self.model_key,
+                    "temperature": self.temperature,
+                    "max_tokens": self.max_tokens,
+                    "stream": False
+                },
+                timeout=180  # 3 minutes timeout
             )
-        else:
-            formatted_prompt = prompt
-        
-        result = self.pipe(formatted_prompt)
-        return result[0]["generated_text"].replace(formatted_prompt, "").strip()
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            logger.info(f"✅ Remote LLM response received ({len(result['text'])} chars)")
+            return result["text"]
+            
+        except requests.exceptions.Timeout:
+            logger.error("⏱️ Request timeout")
+            raise TimeoutError("LLM request timeout after 180 seconds")
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                logger.error("🔒 Authentication failed - check API key")
+                raise PermissionError("Invalid API key for remote LLM service")
+            else:
+                logger.error(f"❌ HTTP error: {e}")
+                raise
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ API request failed: {e}")
+            raise
     
     def stream(self, prompt: str) -> Generator[str, None, None]:
-        # For simplicity, yield full response (streaming with HF models is more complex)
+        """Simulate streaming by chunking the response"""
+        # For simplicity, get full response and yield in chunks
         response = self.invoke(prompt)
-        # Simulate streaming by yielding in chunks
+        
+        # Yield in chunks of 50 chars
         chunk_size = 50
         for i in range(0, len(response), chunk_size):
             yield response[i:i + chunk_size]
@@ -139,10 +136,13 @@ class LLMManager:
         
         # Return cached instance
         if model_key in cls._instances:
+            logger.info(f"📦 Using cached LLM: {model_key}")
             return cls._instances[model_key]
         
-        # Create new instance
+        # Get model config - FIX: Gọi từ instance, không phải class
         model_config = config.llm.get_model_config(model_key)
+        
+        logger.info(f"🔧 Creating LLM instance: {model_key} (type: {model_config['type']})")
         
         if model_config["type"] == "api":
             if model_config["provider"] == "google":
@@ -155,21 +155,21 @@ class LLMManager:
             else:
                 raise ValueError(f"Unsupported API provider: {model_config['provider']}")
         
-        elif model_config["type"] == "local":
-            if model_config["provider"] == "huggingface":
-                llm = HuggingFaceLLM(
-                    model_name=model_config["name"],
-                    temperature=config.llm.temperature,
-                    max_tokens=config.llm.max_output_tokens
-                )
-            else:
-                raise ValueError(f"Unsupported local provider: {model_config['provider']}")
+        elif model_config["type"] == "remote":
+            # Remote GPU LLM
+            llm = RemoteGPULLM(
+                api_url=config.llm.remote_llm_url,
+                model_key="qwen-7b",  # Model key on remote server
+                temperature=config.llm.temperature,
+                max_tokens=config.llm.max_output_tokens,
+                api_key=config.llm.remote_llm_api_key
+            )
         
         else:
             raise ValueError(f"Unsupported model type: {model_config['type']}")
         
         cls._instances[model_key] = llm
-        logger.info(f"Created LLM instance: {model_key}")
+        logger.info(f"✅ Created LLM instance: {model_key}")
         
         return llm
     
@@ -182,4 +182,4 @@ class LLMManager:
     def clear_cache(cls):
         """Clear cached model instances"""
         cls._instances.clear()
-        logger.info("Cleared LLM cache")
+        logger.info("🧹 Cleared LLM cache")

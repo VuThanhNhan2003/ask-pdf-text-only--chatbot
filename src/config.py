@@ -4,8 +4,9 @@ Centralized settings with absolute paths
 """
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
+from pathlib import Path
 
 load_dotenv()
 
@@ -29,14 +30,15 @@ class QdrantConfig:
     port: int = 6333
     collection_name: str = "documents"
     timeout: int = 30
-
+    
     def __post_init__(self):
         # Allow override from environment
         self.collection_name = os.getenv("QDRANT_COLLECTION", self.collection_name)
-
+        
         # Support both Docker (qdrant) and local dev (localhost)
         qdrant_url = os.getenv("QDRANT_URL", "")
         if qdrant_url:
+            # Parse QDRANT_URL if provided (e.g., http://qdrant:6333)
             if "://" in qdrant_url:
                 parts = qdrant_url.split("://")[1].split(":")
                 self.host = parts[0]
@@ -50,7 +52,7 @@ class ChunkingConfig:
     chunk_size: int = 1000
     chunk_overlap: int = 200
     separators: list = None
-
+    
     def __post_init__(self):
         if self.separators is None:
             self.separators = ["\n\n", "\n", ". ", "! ", "? ", " ", ""]
@@ -58,48 +60,54 @@ class ChunkingConfig:
 
 @dataclass
 class LLMConfig:
-    """LLM configuration with branch-safe fallback."""
+    """LLM configuration"""
+    
+    # ✅ FIX: Đảm bảo AVAILABLE_MODELS là class variable, KHÔNG phải instance variable
     AVAILABLE_MODELS = {
         "gemini": {
-            "name": "gemini-2.0-flash",
+            "name": "gemini-2.5-flash",
             "type": "api",
             "provider": "google",
         },
-        "Qwen2.5-3B-Instruct": {
-            "name": "Qwen/Qwen2.5-3B-Instruct",
-            "type": "local",
-            "provider": "huggingface",
+        "qwen-7b": {
+            "name": "Qwen/Qwen2.5-7B-Instruct",
+            "type": "remote",
+            "provider": "remote-gpu",
         },
-        # "qwen2.5-3b-q4": {
-        #     "name": "Qwen/qwen2.5-3b-q4",
-        #     "type": "local",
-        #     "provider": "huggingface",
-        # }
     }
-
-    current_model: str = os.getenv("LLM_MODEL", "gemini")
-    temperature: float = float(os.getenv("LLM_TEMPERATURE", 0.7))
-    max_output_tokens: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", 2048))
-    api_key: str = os.getenv("GOOGLE_API_KEY", "")
-
-    # Assigned in __post_init__
-    model_name: str = None
-    local_models_folder: str = str(PROJECT_ROOT / "models" / "llm")
-
+    
     def __post_init__(self):
-        # Fallback nếu current_model không có trong AVAILABLE_MODELS
+        """Initialize instance variables after dataclass creation"""
+        # Current model selection from env
+        self.current_model = os.getenv("LLM_MODEL", "gemini")
+        
+        # Validate model exists
         if self.current_model not in self.AVAILABLE_MODELS:
-            print(f"⚠️ Warning: LLM_MODEL '{self.current_model}' not found. Falling back to 'gemini'.")
+            print(f"⚠️ Warning: LLM_MODEL '{self.current_model}' not found in AVAILABLE_MODELS")
+            print(f"Available models: {list(self.AVAILABLE_MODELS.keys())}")
+            print("Falling back to 'gemini'")
             self.current_model = "gemini"
+        
+        # Model-specific configs
         self.model_name = self.AVAILABLE_MODELS[self.current_model]["name"]
-
-        # Debug
-        print(f"✅ Using LLM model: '{self.current_model}' -> '{self.model_name}'")
-
-    @classmethod
-    def get_model_config(cls, model_key: str) -> dict:
+        self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+        self.max_output_tokens = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "2048"))
+        self.api_key = os.getenv("GOOGLE_API_KEY", "")
+        
+        # Remote LLM service URL
+        self.remote_llm_url = os.getenv("REMOTE_LLM_URL", "")
+        self.remote_llm_api_key = os.getenv("REMOTE_LLM_API_KEY", "")
+        
+        # Validate remote config if using remote model
+        if self.AVAILABLE_MODELS[self.current_model]["type"] == "remote":
+            if not self.remote_llm_url:
+                raise ValueError("REMOTE_LLM_URL is required for remote models")
+            if not self.remote_llm_api_key:
+                raise ValueError("REMOTE_LLM_API_KEY is required for remote models")
+    
+    def get_model_config(self, model_key: str) -> dict:
         """Get configuration for specific model"""
-        return cls.AVAILABLE_MODELS.get(model_key, cls.AVAILABLE_MODELS["gemini"])
+        return self.AVAILABLE_MODELS.get(model_key, self.AVAILABLE_MODELS["gemini"])
 
 
 @dataclass
@@ -117,7 +125,7 @@ class AppConfig:
     log_folder: str = str(PROJECT_ROOT / "logs")
     page_title: str = "RAG Chatbot"
     page_icon: str = "🤖"
-
+    
     def __post_init__(self):
         # Ensure folders exist
         os.makedirs(self.data_folder, exist_ok=True)
@@ -130,30 +138,52 @@ class Config:
         self.embedding = EmbeddingConfig()
         self.qdrant = QdrantConfig()
         self.chunking = ChunkingConfig()
-        self.llm = LLMConfig()  # Sử dụng LLMConfig thông minh
+        self.llm = LLMConfig()
         self.retrieval = RetrievalConfig()
         self.app = AppConfig()
-
+    
     def validate(self) -> bool:
         """Validate configuration"""
         try:
-            if not self.llm.api_key:
+            # Check API key for API models
+            if self.llm.current_model == "gemini" and not self.llm.api_key:
+                print("❌ GOOGLE_API_KEY not set for Gemini model")
                 return False
+            
+            # Check remote URL for remote models
+            model_config = self.llm.get_model_config(self.llm.current_model)
+            if model_config["type"] == "remote":
+                if not self.llm.remote_llm_url:
+                    print("❌ REMOTE_LLM_URL not set for remote model")
+                    return False
+                if not self.llm.remote_llm_api_key:
+                    print("❌ REMOTE_LLM_API_KEY not set for remote model")
+                    return False
+            
+            # Check data folder
             if not os.path.exists(self.app.data_folder):
                 print(f"⚠️ Data folder not found: {self.app.data_folder}")
                 return False
+            
             return True
         except Exception as e:
             print(f"❌ Configuration validation failed: {e}")
             return False
-
-    def print_paths(self):
-        """Debug: print all paths"""
-        print(f"📂 PROJECT_ROOT: {PROJECT_ROOT}")
+    
+    def print_config(self):
+        """Print current configuration for debugging"""
+        print("=" * 60)
+        print("Current Configuration:")
+        print("=" * 60)
         print(f"📂 Data folder: {self.app.data_folder}")
         print(f"📂 Log folder: {self.app.log_folder}")
         print(f"📂 Model cache: {self.embedding.cache_folder}")
-        print(f"📂 Model path: {self.embedding.local_path}")
+        print(f"🤖 LLM Model: {self.llm.current_model}")
+        print(f"🌐 Model Type: {self.llm.get_model_config(self.llm.current_model)['type']}")
+        if self.llm.get_model_config(self.llm.current_model)["type"] == "remote":
+            print(f"🔗 Remote URL: {self.llm.remote_llm_url}")
+            print(f"🔑 API Key: {'Set' if self.llm.remote_llm_api_key else 'Not set'}")
+        print("=" * 60)
 
 
 # Global config instance
