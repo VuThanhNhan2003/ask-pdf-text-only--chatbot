@@ -15,6 +15,8 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+import asyncio
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LLMProxy")
