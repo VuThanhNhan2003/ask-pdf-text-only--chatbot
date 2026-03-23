@@ -22,3 +22,5 @@ test/
 *.log
 src/app.py
 vpn_config/
+scripts/
+evaluation/

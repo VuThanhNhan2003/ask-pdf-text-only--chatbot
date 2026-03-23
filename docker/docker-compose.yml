@@ -83,7 +83,8 @@ services:
       MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2
       MODEL_DIR: /app/models
       LLM_MODEL: ${LLM_MODEL:-qwen2-7b}  # Use proxy model by default
-      HF_HOME: /hf_cache
+      HF_HOME: ${HF_HOME:-/hf_cache}
+      SENTENCE_TRANSFORMERS_HOME: ${SENTENCE_TRANSFORMERS_HOME:-/hf_cache}
       
       # Python
       PYTHONPATH: /app
@@ -91,6 +92,8 @@ services:
       
     volumes:
       - ../src:/app/src
+      - ../scripts:/app/scripts
+      - ../evaluation:/app/evaluation
       - ../database:/app/database
       - ../auth:/app/auth
       - ../services:/app/services
@@ -110,6 +113,74 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8501/_stcore/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+
+  # FastAPI Chatbot API
+  chatbot_api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: chatbot_api
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      llm_proxy:
+        condition: service_healthy
+
+    env_file:
+      - ../.env
+
+    environment:
+      # Database
+      DATABASE_URL: postgresql://chatbot_user:${POSTGRES_PASSWORD:-chatbot_pass_2024}@postgres:5432/chatbot_db
+      
+      # Qdrant
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: documents
+      
+      # LLM Proxy
+      LLM_PROXY_URL: http://llm_proxy:5000
+      
+      # Model
+      MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2
+      MODEL_DIR: /app/models
+      HF_HOME: ${HF_HOME:-/hf_cache}
+      SENTENCE_TRANSFORMERS_HOME: ${SENTENCE_TRANSFORMERS_HOME:-/hf_cache}
+      
+      # Python
+      PYTHONPATH: /app:/app/src
+      PYTHONUNBUFFERED: "1"
+
+    volumes:
+      - ../src:/app/src
+      - ../scripts:/app/scripts
+      - ../evaluation:/app/evaluation
+      - ../database:/app/database
+      - ../auth:/app/auth
+      - ../services:/app/services
+      - ../components:/app/components
+      - ../models:/app/models
+      - ../data:/app/data
+      - ../logs:/app/logs
+      - ../widget:/app/widget
+      - hf_cache_${BRANCH_NAME-main}:/hf_cache
+
+    command: >
+      sh -c "uvicorn src.api_service:app --host 0.0.0.0 --port 8000"
+
+    ports:
+      - "9100:8000"
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10

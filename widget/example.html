@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chatbot Widget Example</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .container {
+            background: #f5f5f5;
+            padding: 40px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        h1 {
+            color: #333;
+        }
+        .code-block {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 20px;
+            border-radius: 5px;
+            overflow-x: auto;
+            margin: 20px 0;
+        }
+        .code-block code {
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+        .note {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .config-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        .config-table th,
+        .config-table td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
+        }
+        .config-table th {
+            background: #4CAF50;
+            color: white;
+        }
+        .config-table tr:nth-child(even) {
+            background: #f2f2f2;
+        }
+    </style>
+</head>
+<body>
+    <h1>🤖 RAG Chatbot Widget - Integration Guide</h1>
+    
+    <div class="container">
+        <h2>Quick Start</h2>
+        <p>Add this single line of code to your website to embed the chatbot widget:</p>
+        
+        <div class="code-block">
+            <code>
+&lt;script src="https://chatbot.itp.vn:9100/widget/loader.js" 
+        data-api-url="https://chatbot.itp.vn:9100"
+        data-position="bottom-right"
+        data-primary-color="#1f77b4"&gt;&lt;/script&gt;
+            </code>
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>Configuration Options</h2>
+        <p>You can customize the widget using data attributes:</p>
+        
+        <table class="config-table">
+            <thead>
+                <tr>
+                    <th>Attribute</th>
+                    <th>Description</th>
+                    <th>Default</th>
+                    <th>Example</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>data-api-url</code></td>
+                    <td>API endpoint URL</td>
+                    <td>https://chatbot.itp.vn:9100</td>
+                    <td>https://api.example.com</td>
+                </tr>
+                <tr>
+                    <td><code>data-widget-url</code></td>
+                    <td>Widget JavaScript file URL (optional)</td>
+                    <td>Auto-detected</td>
+                    <td>https://cdn.example.com/widget.js</td>
+                </tr>
+                <tr>
+                    <td><code>data-subject</code></td>
+                    <td>Filter by subject (optional)</td>
+                    <td>null (all subjects)</td>
+                    <td>Mathematics</td>
+                </tr>
+                <tr>
+                    <td><code>data-model-key</code></td>
+                    <td>AI model to use (optional)</td>
+                    <td>null (default model)</td>
+                    <td>gemini</td>
+                </tr>
+                <tr>
+                    <td><code>data-position</code></td>
+                    <td>Widget position</td>
+                    <td>bottom-right</td>
+                    <td>bottom-left, top-right, top-left</td>
+                </tr>
+                <tr>
+                    <td><code>data-primary-color</code></td>
+                    <td>Primary color (hex)</td>
+                    <td>#1f77b4</td>
+                    <td>#FF5733</td>
+                </tr>
+                <tr>
+                    <td><code>data-text-color</code></td>
+                    <td>Text color (hex)</td>
+                    <td>#333333</td>
+                    <td>#000000</td>
+                </tr>
+                <tr>
+                    <td><code>data-background-color</code></td>
+                    <td>Background color (hex)</td>
+                    <td>#ffffff</td>
+                    <td>#F5F5F5</td>
+                </tr>
+                <tr>
+                    <td><code>data-button-text</code></td>
+                    <td>Chat button text</td>
+                    <td>🤖</td>
+                </tr>
+                <tr>
+                    <td><code>data-welcome-message</code></td>
+                    <td>Welcome message</td>
+                    <td>Xin chào! Tôi có thể giúp gì cho bạn?</td>
+                    <td>Hello! How can I help?</td>
+                </tr>
+                <tr>
+                    <td><code>data-placeholder</code></td>
+                    <td>Input placeholder text</td>
+                    <td>Nhập câu hỏi của bạn...</td>
+                    <td>Type your question...</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="container">
+        <h2>Full Example</h2>
+        <div class="code-block">
+            <code>
+&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;
+    &lt;title&gt;My Website&lt;/title&gt;
+&lt;/head&gt;
+&lt;body&gt;
+    &lt;h1&gt;Welcome to My Website&lt;/h1&gt;
+    &lt;p&gt;This is my website content...&lt;/p&gt;
+    
+    &lt;!-- Chatbot Widget --&gt;
+    &lt;script src="https://your-domain.com/widget/loader.js" 
+            data-api-url="https://api.example.com"
+            data-subject="Mathematics"
+            data-position="bottom-right"
+            data-primary-color="#1f77b4"
+            data-button-text="💬 Hỏi đáp"
+            data-welcome-message="Xin chào! Tôi có thể giúp gì cho bạn về môn Toán?"
+            data-placeholder="Nhập câu hỏi về Toán học..."&gt;
+    &lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+            </code>
+        </div>
+    </div>
+
+    <div class="note">
+        <strong>⚠️ Important Notes:</strong>
+        <ul>
+            <li>Make sure your API server has CORS enabled for your domain</li>
+            <li>Update <code>data-api-url</code> to point to your actual API endpoint</li>
+            <li>For production, use HTTPS URLs</li>
+            <li>The widget is mobile-responsive and will adapt to smaller screens</li>
+        </ul>
+    </div>
+
+    <div class="container">
+        <h2>Manual Initialization (Advanced)</h2>
+        <p>If you need more control, you can manually initialize the widget:</p>
+        <div class="code-block">
+            <code>
+&lt;script src="https://your-domain.com/widget/chatbot-widget.js"&gt;&lt;/script&gt;
+&lt;script&gt;
+    // Wait for widget to load
+    window.addEventListener('load', function() {
+        const widget = new ChatbotWidget({
+            apiUrl: 'https://api.example.com',
+            subject: 'Mathematics',
+            position: 'bottom-right',
+            primaryColor: '#1f77b4'
+        });
+        // Access widget instance
+        window.myChatbot = widget;
+    });
+&lt;/script&gt;
+            </code>
+        </div>
+    </div>
+
+    <!-- Example: Embed the widget on this page -->
+    <div class="note">
+        <strong>💡 Try it now!</strong> The chatbot widget should appear in the bottom-right corner of this page.
+    </div>
+
+    <!-- Widget Script - Replace with your actual URL -->
+    <script src="loader.js" 
+            data-api-url="https://chatbot.itp.vn:9100"
+            data-position="bottom-right"
+            data-primary-color="#1f77b4"
+            data-button-text="🤖"
+            data-welcome-message="Xin chào! Tôi có thể giúp gì cho bạn?"
+            data-placeholder="Nhập câu hỏi của bạn...">
+    </script>
+</body>
+</html>

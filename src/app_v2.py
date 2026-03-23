@@ -185,7 +185,12 @@ def render_conversations_sidebar(user_id: int, current_subject: str):
                         with get_db() as db:
                             ConversationService.delete_conversation(db, conv['id'], user_id)
                         if st.session_state.current_conversation_id == conv['id']:
-                            st.session_state.current_conversation_id = None
+                            remaining_conversations = [c for c in conv_data if c['id'] != conv['id']]
+                            st.session_state.current_conversation_id = (
+                                remaining_conversations[0]['id'] if remaining_conversations else None
+                            )
+                            if not remaining_conversations and st.session_state.processor:
+                                st.session_state.processor.clear_history()
                         st.rerun()
 
 
@@ -195,57 +200,70 @@ def render_conversations_sidebar(user_id: int, current_subject: str):
 def render_chat_interface(user_id: int, selected_subject: str):
     """Render main chat interface"""
     
-    # Get or create conversation
-    if not st.session_state.current_conversation_id:
-        conv_id = create_new_conversation(user_id, selected_subject)
-        conv_subject = selected_subject if selected_subject != "Tất cả môn học" else None
-        conv_title = "New Chat"
-    else:
+    conv_id = st.session_state.current_conversation_id
+    conv_subject = selected_subject if selected_subject != "Tất cả môn học" else None
+    messages = []
+
+    # If no active conversation, reuse the latest existing one instead of creating a new chat.
+    if not conv_id:
+        with get_db() as db:
+            recent_conversations = ConversationService.get_user_conversations(db, user_id, limit=1)
+            if recent_conversations:
+                conv_id = recent_conversations[0].id
+                st.session_state.current_conversation_id = conv_id
+
+    # Load active conversation when available.
+    if conv_id:
         with get_db() as db:
             conv = ConversationService.get_conversation(
-                db, st.session_state.current_conversation_id, user_id
+                db, conv_id, user_id
             )
             if not conv:
-                # Conversation deleted or doesn't exist
                 st.session_state.current_conversation_id = None
-                st.rerun()
-            
-            # Extract data while session is active
-            conv_id = conv.id
-            conv_subject = conv.subject
-            conv_title = conv.title
-    
-    # Display conversation info
+                conv_id = None
+            else:
+                conv_id = conv.id
+                conv_subject = conv.subject
+                messages = load_conversation_messages(conv_id)
+
+    # Display conversation info/state.
     st.info(f"📖 Môn học: **{conv_subject or 'Tất cả môn học'}**")
-    
-    # Load and display messages
-    messages = load_conversation_messages(conv_id)
-    
-    # Sync history with processor (ALWAYS sync to ensure correct conversation context)
-    if st.session_state.processor:
-        # Convert messages to processor history format
-        history_for_processor = []
-        for msg in messages:
-            history_for_processor.append({
-                "role": msg['role'],
-                "content": msg['content']
-            })
-        st.session_state.processor.set_history(history_for_processor)
-        logger.info(f"🔄 Synced history: {len(history_for_processor)} messages for conversation {conv_id}")
-    
-    if messages:
-        for msg in messages:
-            avatar = "user" if msg['role'] == "user" else "assistant"
-            
-            with st.chat_message(avatar):
-                st.markdown(msg['content'])
+
+    if conv_id:
+        # Sync history with processor to ensure correct conversation context.
+        if st.session_state.processor:
+            history_for_processor = []
+            for msg in messages:
+                history_for_processor.append({
+                    "role": msg['role'],
+                    "content": msg['content']
+                })
+            st.session_state.processor.set_history(history_for_processor)
+            logger.info(f"🔄 Synced history: {len(history_for_processor)} messages for conversation {conv_id}")
+
+        if messages:
+            for msg in messages:
+                avatar = "user" if msg['role'] == "user" else "assistant"
+
+                with st.chat_message(avatar):
+                    st.markdown(msg['content'])
+        else:
+            st.info("💡 Hãy đặt câu hỏi để bắt đầu trò chuyện")
     else:
-        st.info("💡 Hãy đặt câu hỏi để bắt đầu trò chuyện")
+        # Keep an empty state instead of auto-creating a new conversation.
+        if st.session_state.processor:
+            st.session_state.processor.clear_history()
+        st.info("💡 Chọn một cuộc trò chuyện bên trái hoặc bấm 'New Chat' để bắt đầu")
     
     # Chat input
     user_input = st.chat_input("Bạn muốn hỏi gì về tài liệu?")
     
     if user_input:
+        # Lazy-create conversation only when user sends the first message.
+        if not conv_id:
+            conv_id = create_new_conversation(user_id, selected_subject)
+            messages = []
+
         # Display user message
         with st.chat_message("user"):
             st.markdown(user_input)
