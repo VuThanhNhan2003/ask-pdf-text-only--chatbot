@@ -97,6 +97,8 @@ HYBRID_MISSING_EPSILON = float(os.getenv("RAG_HYBRID_MISSING_EPSILON", "0.01"))
 RERANKER_MODEL_NAME = os.getenv("RAG_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 RERANK_TOP_N_DEFAULT = int(os.getenv("RAG_RERANK_TOP_N", str(config.retrieval.top_k)))
 RERANK_BATCH_SIZE = int(os.getenv("RAG_RERANK_BATCH_SIZE", "8"))
+RERANK_CANDIDATE_MULTIPLIER = int(os.getenv("RAG_RERANK_CANDIDATE_MULTIPLIER", "1"))
+RERANK_CANDIDATE_CAP = int(os.getenv("RAG_RERANK_CANDIDATE_CAP", "30"))
 
 # Dense search threshold for Qdrant; set <=0 to disable thresholding.
 DENSE_SCORE_THRESHOLD = float(os.getenv("RAG_DENSE_SCORE_THRESHOLD", str(config.retrieval.score_threshold)))
@@ -470,7 +472,8 @@ class RAGProcessor:
         except (TypeError, ValueError):
             page = 0
 
-        raw_chunk_id = item.get("id") or item.get("id_") or metadata.get("chunk_id")
+        # Prefer id_ first to match evaluation/query annotation convention.
+        raw_chunk_id = item.get("id_") or item.get("id") or metadata.get("chunk_id")
         if raw_chunk_id is not None and str(raw_chunk_id).strip():
             chunk_id = str(raw_chunk_id)
         else:
@@ -1038,10 +1041,14 @@ class RAGProcessor:
     def _retrieve_relevant_chunks(self, query: str, k: int = None) -> List[Dict]:
         """Retrieve relevant chunks with hybrid retrieval and reranking."""
         final_top_n = k if k is not None else RERANK_TOP_N_DEFAULT
+        multiplier = max(1, RERANK_CANDIDATE_MULTIPLIER)
+        cap = max(final_top_n, RERANK_CANDIDATE_CAP)
+        # Keep candidate pool wider than final top-n, but avoid adding too many noisy negatives.
+        candidate_k = max(HYBRID_TOP_K, min(cap, final_top_n * multiplier))
 
         try:
             # Stage 1: hybrid dense + BM25 retrieval
-            hybrid_candidates = self.hybrid_retrieve(query, top_k=HYBRID_TOP_K)
+            hybrid_candidates = self.hybrid_retrieve(query, top_k=candidate_k)
             if not hybrid_candidates:
                 logger.info("🔍 Hybrid retrieval returned 0 candidates")
                 return []
@@ -1052,7 +1059,7 @@ class RAGProcessor:
             logger.info(
                 "🔍 Retrieved %s candidates (hybrid=%s) and kept %s after rerank",
                 len(hybrid_candidates),
-                HYBRID_TOP_K,
+                candidate_k,
                 len(relevant_chunks),
             )
             return relevant_chunks
@@ -1106,9 +1113,12 @@ class RAGProcessor:
     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Retrieve chunks and return a debug table of per-chunk scores."""
         final_top_n = k if k is not None else RERANK_TOP_N_DEFAULT
+        multiplier = max(1, RERANK_CANDIDATE_MULTIPLIER)
+        cap = max(final_top_n, RERANK_CANDIDATE_CAP)
+        candidate_k = max(HYBRID_TOP_K, min(cap, final_top_n * multiplier))
 
         try:
-            hybrid_candidates = self.hybrid_retrieve(query, top_k=HYBRID_TOP_K)
+            hybrid_candidates = self.hybrid_retrieve(query, top_k=candidate_k)
             if not hybrid_candidates:
                 logger.info("🔍 Hybrid retrieval returned 0 candidates (debug mode)")
                 return [], []

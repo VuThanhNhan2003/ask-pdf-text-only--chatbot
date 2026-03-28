@@ -98,6 +98,7 @@ services:
       - ../auth:/app/auth
       - ../services:/app/services
       - ../components:/app/components
+      - ../frontend:/app/frontend
       - ../models:/app/models
       - ../data:/app/data
       - ../logs:/app/logs
@@ -165,6 +166,7 @@ services:
       - ../auth:/app/auth
       - ../services:/app/services
       - ../components:/app/components
+      - ../frontend:/app/frontend
       - ../models:/app/models
       - ../data:/app/data
       - ../logs:/app/logs

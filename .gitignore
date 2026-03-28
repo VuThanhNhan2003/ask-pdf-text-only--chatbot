@@ -24,3 +24,5 @@ src/app.py
 vpn_config/
 scripts/
 evaluation/
+evaluation_reports/
+frontend/logo_image/

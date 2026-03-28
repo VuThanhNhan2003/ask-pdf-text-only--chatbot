@@ -4,6 +4,12 @@ Streamlit authentication UI components
 import streamlit as st
 from auth.authentication import AuthService, AuthenticationError
 from database.database import get_db
+from frontend.streamlit_ui import render_auth_brand_header
+
+
+def render_auth_brand():
+    """Render app branding on auth page."""
+    render_auth_brand_header()
 
 
 def init_auth_state():
@@ -107,11 +113,7 @@ def render_signup_form():
 
 def render_auth_page():
     """Render main authentication page"""
-    st.set_page_config(
-        page_title="Login - RAG Chatbot",
-        page_icon="🔐",
-        layout="centered"
-    )
+    render_auth_brand()
     
     # Tabs for login/signup
     tab1, tab2 = st.tabs(["Đăng nhập", "Đăng ký"])
@@ -157,8 +159,12 @@ def render_user_menu():
         
         with st.sidebar:
             st.markdown("---")
-            st.markdown(f"**👤 {user['username']}**")
-            st.caption(user['email'])
+            st.markdown(
+                "<div style='font-size:0.82rem; text-transform:uppercase; letter-spacing:.08em; color:#60708a; font-weight:700; margin-bottom:8px;'>Tài khoản</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(f"**👤 {user['full_name'] or user['username']}**")
+            st.caption(f"@{user['username']} • {user['email']}")
             
-            if st.button("🚪 Đăng xuất", use_container_width=True):
+            if st.button("Đăng xuất", use_container_width=True):
                 logout()
