@@ -148,10 +148,6 @@ def render_sidebar(user_id: int) -> tuple[str, str, dict]:
         )
         selected_model = model_options[selected_model_display]
 
-        with st.expander("ℹ️ Thông tin model", expanded=False):
-            info = available_models[selected_model]
-            st.caption(f"**{info['name']}** · {info['type']} · {info['provider']}")
-
         st.divider()
 
         # ── New Chat ──
@@ -191,7 +187,7 @@ def render_sidebar(user_id: int) -> tuple[str, str, dict]:
                         st.session_state.current_conversation_id = conv["id"]
                         st.rerun()
                 with c2:
-                    if st.button("✕", key=f"del_{conv['id']}", help="Xóa"):
+                    if st.button("❌", key=f"del_{conv['id']}", help="Xóa"):
                         with get_db() as db:
                             ConversationService.delete_conversation(db, conv["id"], user_id)
                         if st.session_state.current_conversation_id == conv["id"]:

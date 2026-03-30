@@ -74,11 +74,11 @@ class LLMConfig:
             "provider": "google",
             "description": "Google Gemini (API)"
         },
-        "qwen2-7b": {
-            "name": "Qwen/Qwen2.5-7B-Instruct",
+        "qwen3-8b": {
+            "name": "Qwen/Qwen3-8B-AWQ",
             "type": "proxy",
             "provider": "vllm",
-            "description": "Qwen 7B via Proxy (vLLM + Gemini fallback)"
+            "description": "Qwen 8B via Proxy (vLLM + Gemini fallback)"
         },
     }
     

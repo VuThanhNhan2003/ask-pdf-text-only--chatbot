@@ -1236,6 +1236,22 @@ class RAGProcessor:
     # Cập nhật các phương thức gọi:
     def get_response(self, query: str, use_history: bool = True) -> str:
         """Get response for query (non-streaming)"""
+        import time
+        t0 = time.time()
+
+        relevant_chunks = self._retrieve_relevant_chunks(query)
+        t1 = time.time()
+        logger.info(f"⏱️ Retrieval+Rerank: {t1-t0:.2f}s | chunks={len(relevant_chunks)}")
+
+        context = self._build_context(relevant_chunks)
+        prompt = self._build_prompt(context, query, use_history=use_history)
+        t2 = time.time()
+
+        response = self.llm.invoke(prompt)
+        t3 = time.time()
+        logger.info(f"⏱️ LLM generate: {t3-t2:.2f}s | prompt_chars={len(prompt)}")
+        logger.info(f"⏱️ Total get_response: {t3-t0:.2f}s")    
+            
         logger.info(f"💬 Processing query with {self.llm_model_key}: {query[:100]}...")
         start_time = time.time()
         

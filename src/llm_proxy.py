@@ -32,6 +32,8 @@ MAX_RETRIES = 3
 HEALTH_CHECK_TIMEOUT = 5
 REQUEST_TIMEOUT = 120
 
+VLLM_MODEL_NAME = os.getenv("VLLM_MODEL_NAME", "Qwen/Qwen3-8B-AWQ")
+
 # ==================== MODELS ====================
 class ChatMessage(BaseModel):
     role: str
@@ -92,10 +94,12 @@ class VLLMManager:
         
         payload = {
             "model": request.model,
-            "messages": [msg.dict() for msg in request.messages],
+            "messages": [msg.model_dump() for msg in request.messages],
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
-            "stream": stream
+            "stream": stream,
+            # Qwen3: tắt thinking mode để tránh <think>...</think> leak vào response
+           "chat_template_kwargs": {"enable_thinking": False},
         }
         
         if stream:
@@ -145,7 +149,7 @@ async def fallback_to_gemini(request: ChatCompletionRequest):
         from langchain_google_genai import ChatGoogleGenerativeAI
         
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             temperature=request.temperature,
             max_output_tokens=request.max_tokens,
             google_api_key=GEMINI_API_KEY
@@ -223,60 +227,41 @@ def health():
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
-    """
-    OpenAI-compatible chat completions with retry & fallback
-    
-    Flow:
-    1. Find healthy vLLM server
-    2. Try vLLM (with 3 retries)
-    3. If all fail → Fallback to Gemini
-    """
-    
-    logger.info(f"Request: model={request.model}, stream={request.stream}")
-    
-    # Try vLLM with retries
+    import time
+    t0 = time.time()
+    logger.info(f"📨 Request received: model={request.model}, "
+                f"messages={len(request.messages)}, "
+                f"prompt_len={sum(len(m.content) for m in request.messages)}")
+
     for attempt in range(MAX_RETRIES):
         try:
-            # Get healthy server
             server = vllm_manager.get_healthy_server()
-            
             if server is None:
-                logger.warning("No healthy vLLM servers available")
                 break
-            
-            # Log attempt
-            if attempt > 0:
-                logger.info(f"Retry {attempt + 1}/{MAX_RETRIES}")
-            
-            # Forward to vLLM
-            logger.info(f"→ Forwarding to {server}")
-            
-            result = await vllm_manager.forward_to_vllm(
-                server,
-                request,
-                stream=request.stream
-            )
-            
-            logger.info(f"✅ Success from {server}")
+
+            t1 = time.time()
+            result = await vllm_manager.forward_to_vllm(server, request, stream=request.stream)
+            t2 = time.time()
+
+            # Stream mode returns a StreamingResponse, not JSON dict.
+            if request.stream:
+                logger.info(f"✅ vLLM stream started in {t2-t1:.2f}s | total_wall={t2-t0:.2f}s")
+                return result
+
+            usage = result.get("usage", {})
+            logger.info(f"✅ vLLM done in {t2-t1:.2f}s | "
+                        f"prompt={usage.get('prompt_tokens')} | "
+                        f"completion={usage.get('completion_tokens')} | "
+                        f"total_wall={t2-t0:.2f}s")
             return result
-            
+
         except Exception as e:
-            logger.warning(f"⚠️ Attempt {attempt + 1} failed: {e}")
-            
-            # Mark server as unhealthy
+            logger.warning(f"⚠️ Attempt {attempt+1} failed: {e}")
             if server:
                 vllm_manager.health_status[server] = False
-            
-            if attempt < MAX_RETRIES - 1:
-                # Wait before retry
-                await asyncio.sleep(1)
-                continue
-            else:
-                # All retries exhausted
-                logger.error("All vLLM attempts failed")
-    
-    # Fallback to Gemini
-    logger.warning("🔄 Using Gemini fallback")
+            await asyncio.sleep(1)
+
+    logger.warning(f"🔄 Falling back to Gemini after {time.time()-t0:.2f}s")
     return await fallback_to_gemini(request)
 
 

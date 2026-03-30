@@ -108,7 +108,11 @@ class ProxyLLM(BaseLLM):
                 ],
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
-                "stream": False
+                "stream": False,
+                # Qwen3 AWQ: cần presence_penalty để tránh repetition loop
+                "presence_penalty": float(os.getenv("LLM_PRESENCE_PENALTY", "1.5")),
+                # Tắt thinking mode
+                "chat_template_kwargs": {"enable_thinking": False},
             }
             
             logger.debug(f"→ Calling proxy: {self.proxy_url}/v1/chat/completions")
@@ -156,7 +160,11 @@ class ProxyLLM(BaseLLM):
                 ],
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
-                "stream": True
+                "stream": True,
+                # Qwen3 AWQ: cần presence_penalty để tránh repetition loop
+                "presence_penalty": float(os.getenv("LLM_PRESENCE_PENALTY", "1.5")),
+                # Tắt thinking mode
+                "chat_template_kwargs": {"enable_thinking": False},
             }
             
             logger.debug(f"→ Streaming from proxy: {self.proxy_url}")

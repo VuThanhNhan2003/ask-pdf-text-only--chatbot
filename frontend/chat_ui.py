@@ -127,8 +127,7 @@ def render_empty_state():
         f' style="border-radius:14px;object-fit:cover;" alt=""/>'
         if avatar else
         '<div style="width:56px;height:56px;border-radius:14px;'
-        'background:linear-gradient(135deg,#0d2b4e,#2563eb);'
-        'display:flex;align-items:center;justify-content:center;font-size:26px;">🎓</div>'
+        'background:linear-gradient(135deg,#0d2b4e,#2563eb);"></div>'
     )
     st.markdown(f"""
 <div style="

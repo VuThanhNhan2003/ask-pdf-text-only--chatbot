@@ -1,360 +1,260 @@
-# Advanced RAG Pipeline (Hybrid Retrieval + Reranking)
+# Advanced RAG Pipeline (Hybrid Retrieval, Reranking, Proxy LLM)
 
-A production-oriented Retrieval-Augmented Generation (RAG) system for educational document QA, with both Web UI and API interfaces.
+Production-oriented Retrieval-Augmented Generation (RAG) stack for educational QA, with both a Streamlit UI and a FastAPI service.
 
-This project combines:
-- Dense semantic retrieval (Sentence Transformers + Qdrant)
+This codebase includes:
+
+- Dense retrieval (Sentence Transformers + Qdrant)
 - Lexical retrieval (BM25)
-- Score fusion for hybrid ranking
+- Hybrid fusion with configurable mode (`score` default, optional `rrf`)
 - Cross-encoder reranking
-- Multi-source ingestion (PDF and pre-chunked JSON)
-- Pluggable generation layer (Gemini API or vLLM via proxy with fallback)
+- Multi-source ingestion (PDF + pre-chunked JSON)
+- LLM abstraction layer (Gemini API or proxy-backed vLLM)
+- Proxy retries + fallback to Gemini
+- Conversation-aware prompting with short history window
+- Debug retrieval mode with per-chunk score breakdown
 
 ---
 
 ## 1. Overview
 
-This system answers user questions using course materials stored in a vector database and then generates grounded responses with an LLM.
+The system answers user questions grounded in educational documents. It retrieves relevant chunks from indexed materials, reranks them for precision, builds a context-aware prompt, and generates responses through a pluggable LLM backend.
 
-### What makes this RAG system advanced
+### Why this is an advanced RAG implementation
 
-Compared to a basic vector-only RAG setup, this implementation includes:
-
-- Hybrid retrieval:
-	- Dense search in Qdrant
-	- BM25 lexical search over in-memory corpus
-	- Weighted fusion (`alpha`, `beta`) after score normalization
-- Cross-encoder reranking:
-	- Second-stage reranker to improve final context quality
-- Two ingestion modes:
-	- Raw PDFs (extract + chunk)
-	- Pre-processed chunk JSON files (preserve metadata, upsert by chunk ID)
-- Runtime resilience:
-	- LLM proxy with health-check, retry, and fallback to Gemini
-	- Embedding/reranker fallback handling for model-load edge cases
-- Operational optimizations:
-	- Embedding model caching
-	- LLM instance caching
-	- Processor cache by `(subject, model)`
-	- Streaming responses
-- Conversation-aware prompting:
-	- Includes short history window to improve continuity
+- Hybrid retrieval balances semantic and exact-match behavior:
+	- Dense search handles conceptual queries.
+	- BM25 catches exact terms (codes, parameter names, rare keywords).
+- Configurable fusion strategy:
+	- Default: weighted score fusion after normalization.
+	- Optional: Reciprocal Rank Fusion (RRF).
+- Second-stage cross-encoder reranking improves final context quality.
+- Ingestion supports both:
+	- Raw PDFs (`data/source_docs/<subject>/*.pdf`)
+	- Structured JSON chunks (`data/processed_chunks/<subject>/*.json`)
+- Robust serving path:
+	- vLLM through lightweight proxy
+	- Retry and fallback to Gemini when vLLM is unavailable
+- Efficient runtime behavior:
+	- Cached embedding model
+	- Cached LLM instances
+	- Cached processor instances in API service
 
 ---
 
 ## 2. Architecture
 
-### High-level components
+### 2.1 High-level components
 
-- Client layer
-	- Streamlit app (`src/app_v2.py`)
-	- FastAPI RAG API (`src/api_service.py`)
-- RAG core
-	- `RAGProcessor` (`src/processor.py`)
-- LLM abstraction
-	- `LLMManager` and adapters (`src/llm_manager.py`)
-- LLM proxy (optional but recommended for vLLM)
-	- FastAPI proxy (`src/llm_proxy.py`)
-- Storage
-	- Qdrant (vector store + payload metadata)
-	- SQL DB for users/conversations/messages (outside `src`, used by UI)
+- UI layer:
+	- Streamlit app: `src/app_v2.py`
+	- Frontend rendering package: `frontend/`
+- API layer:
+	- FastAPI service: `src/api_service.py`
+- RAG core:
+	- `RAGProcessor`: `src/processor.py`
+- LLM abstraction:
+	- `LLMManager`, `GeminiLLM`, `ProxyLLM`: `src/llm_manager.py`
+- LLM proxy:
+	- FastAPI proxy: `src/llm_proxy.py`
+- Storage:
+	- Qdrant for vectors and chunk payload metadata
+	- SQL database for users/conversations/messages (used by UI services)
 
-### Query data flow
+### 2.2 Query data flow
 
 ```text
-User Query
-	 |
-	 v
+User question
+		|
+		v
 RAGProcessor._retrieve_relevant_chunks()
-	 |
-	 +--> Dense retrieval (Qdrant cosine search)
-	 |
-	 +--> BM25 retrieval (in-memory lexical index built from Qdrant payloads)
-	 |
-	 +--> Hybrid score fusion (min-max normalized, weighted alpha/beta)
-	 |
-	 +--> Cross-encoder reranking
-	 |
-	 v
-Top-N context chunks
-	 |
-	 v
-Prompt construction (+ optional conversation history)
-	 |
-	 v
-LLM generation (Gemini API or ProxyLLM)
-	 |
-	 v
-Response (+ formatted source list)
+		|
+		+--> Dense retrieval (Qdrant cosine + optional threshold + subject filter)
+		|
+		+--> BM25 retrieval (in-memory index from Qdrant payload text)
+		|
+		+--> Hybrid fusion
+		|      - score mode: normalized weighted sum (default)
+		|      - rrf mode: reciprocal rank fusion (optional)
+		|
+		+--> Candidate pool sizing
+		|      - RAG_RERANK_CANDIDATE_MULTIPLIER
+		|      - RAG_RERANK_CANDIDATE_CAP
+		|
+		+--> Cross-encoder rerank
+		|
+		v
+Top-N chunks
+		|
+		v
+Prompt build (+ optional short conversation history)
+		|
+		v
+LLM invoke/stream (GeminiLLM or ProxyLLM)
+		|
+		v
+Answer + source list
 ```
 
-### Indexing/ingestion flow
+### 2.3 Ingestion/indexing flow
 
 ```text
-reload_data()
-	 |
-	 +--> source_docs/<subject>/*.pdf
-	 |      -> text extraction (PyMuPDF)
-	 |      -> chunking (RecursiveCharacterTextSplitter)
-	 |      -> embeddings
-	 |      -> Qdrant upsert
-	 |
-	 +--> processed_chunks/<subject>/*.json
-					-> normalize text/metadata/chunk_id
-					-> embeddings
-					-> Qdrant upsert (supports metadata updates)
+reload_data(clean=False)
+		|
+		+--> data/source_docs/<subject>/*.pdf
+		|      -> validate PDF
+		|      -> page text extraction (PyMuPDF)
+		|      -> recursive chunking
+		|      -> deterministic chunk_id generation
+		|      -> embedding + Qdrant upsert
+		|
+		+--> data/processed_chunks/<subject>/*.json
+					 -> flexible payload extraction (chunks/data/items/documents)
+					 -> normalize text + metadata + ids
+					 -> embedding + Qdrant upsert (metadata updates allowed)
 ```
+
+### 2.4 Hybrid fusion strategy (current behavior)
+
+The retriever merges dense and lexical candidates before reranking.
+
+- Default runtime mode is `score`:
+	- `HYBRID_MODE = os.getenv("RAG_HYBRID_MODE", "score")`
+	- Dense/BM25 scores are min-max normalized, then fused by weighted sum.
+- Optional mode is `rrf`:
+	- Enabled when `RAG_HYBRID_MODE=rrf`
+	- Uses rank-based reciprocal rank fusion with `RAG_RRF_K`.
+
+Score fusion formula:
+
+$$
+s_{hybrid}(d)=\alpha\cdot\hat{s}_{dense}(d)+\beta\cdot\hat{s}_{bm25}(d),\quad \alpha+\beta=1
+$$
+
+Missing-branch score behavior is configurable via:
+
+- `RAG_HYBRID_MISSING_STRATEGY` in `{zero,min,epsilon}`
+- `RAG_HYBRID_MISSING_EPSILON`
 
 ---
 
-## 3. Project Structure (`/src`)
+## 3. Module Responsibilities
 
-```text
-src/
-├── __init__.py
-├── api_service.py
-├── app_v2.py
-├── config.py
-├── llm_manager.py
-├── llm_proxy.py
-└── processor.py
-```
+| Module | Responsibility | Key behavior |
+|---|---|---|
+| `src/processor.py` | Core RAG pipeline | Ingestion, indexing, dense retrieval, BM25, hybrid fusion, rerank, prompt build, response/debug/stream |
+| `src/llm_manager.py` | LLM abstraction and cache | Selects Gemini vs proxy model, handles streaming/non-streaming calls, LLM instance reuse |
+| `src/llm_proxy.py` | Proxy + resilience layer | vLLM health checks, retries, streaming passthrough, Gemini fallback |
+| `src/api_service.py` | Public API service | `/query`, `/query/debug`, `/query/stream`, `/reload`, `/models`, `/subjects`, processor cache |
+| `src/app_v2.py` | Streamlit app entrypoint | Auth gate, sidebar selection, chat UX, DB-backed conversation persistence |
+| `src/config.py` | Configuration management | Dataclass config loading + validation from environment |
 
-### Module responsibilities
+Related non-`src` modules used by UI/runtime:
 
-- `src/processor.py`
-	- Core RAG pipeline: ingestion, chunking, embedding, indexing, retrieval, rerank, prompting, generation
-- `src/llm_manager.py`
-	- LLM abstraction layer with multiple backends:
-		- Gemini API
-		- ProxyLLM (OpenAI-compatible endpoint)
-	- Caches LLM instances
-- `src/llm_proxy.py`
-	- Lightweight proxy for vLLM serving:
-		- Health check
-		- Retry loop
-		- Gemini fallback
-		- Streaming passthrough
-- `src/api_service.py`
-	- FastAPI app exposing health/models/subjects/reload/query/stream endpoints
-	- Caches `RAGProcessor` instances by `(subject, model)`
-- `src/app_v2.py`
-	- Streamlit UI with authentication, conversation list/history, model selector, subject selector, streaming chat
-- `src/config.py`
-	- Dataclass-based configuration loading from environment
+- `frontend/`: UI rendering components used by `src/app_v2.py`
+- `database/`, `services/`, `auth/`: persistence + authentication services
+- `widget/`: static assets mounted by FastAPI when directory exists (`/widget`)
 
 ---
 
-## 4. Key Components
+## 4. Retrieval, Reranking, and Generation Details
 
-### Retriever
+### 4.1 Retrieval pipeline
 
-- Vector DB: Qdrant (`Distance.COSINE`)
-- Embedding model: Sentence Transformers (default env value points to `BAAI/bge-m3` in processor)
-- Dense retrieval:
-	- Query embedding
-	- Optional subject filter
-	- Optional score threshold
-- Lexical retrieval:
-	- BM25 index built from Qdrant payload text
-- Hybrid fusion:
-	- Min-max normalize dense and BM25 scores
-	- Weighted fusion using `RAG_HYBRID_ALPHA` and `RAG_HYBRID_BETA`
+- Dense retrieval (`retrieve_dense`):
+	- Embeds query with sentence-transformers
+	- Qdrant cosine search
+	- Optional score threshold via `RAG_DENSE_SCORE_THRESHOLD`
+	- Optional subject filtering
+- BM25 retrieval (`retrieve_bm25`):
+	- In-memory BM25 index built from Qdrant payload text
+	- Unicode-friendly tokenization
+	- Optional subject filtering
+- Hybrid retrieval (`hybrid_retrieve`):
+	- `score` mode or `rrf` mode
+	- Merges branch metadata and scores per chunk id
 
-### Reranker
+### 4.2 Reranking pipeline
 
-- CrossEncoder reranker (default `BAAI/bge-reranker-v2-m3`)
-- Applied to hybrid candidates
-- Returns final top-N context chunks
+- Cross-encoder reranker (default: `BAAI/bge-reranker-v2-m3`)
+- Lazy-loaded on first rerank call
+- Candidate-pool controls:
+	- `RAG_RERANK_TOP_N`
+	- `RAG_RERANK_CANDIDATE_MULTIPLIER`
+	- `RAG_RERANK_CANDIDATE_CAP`
+- Fallback behavior:
+	- If reranker fails, returns hybrid-ranked candidates
 
-### LLM / Generator
+### 4.3 LLM generation
 
-- Through `LLMManager`:
-	- `GeminiLLM` via `langchain_google_genai`
-	- `ProxyLLM` via HTTP endpoint (OpenAI-style `/v1/chat/completions`)
-- Supports:
-	- Non-streaming and streaming generation
-	- Model instance cache
-- Proxy layer adds:
-	- vLLM health checks
-	- retries
-	- Gemini fallback
+- `LLMManager` supports model keys defined in `config.llm.AVAILABLE_MODELS`
+- Current model map in code:
+	- `gemini` -> API (`gemini-2.5-flash`)
+	- `qwen3-8b` -> proxy (`Qwen/Qwen3-8B-AWQ`)
+- `ProxyLLM` features:
+	- OpenAI-compatible `/v1/chat/completions` call
+	- Non-streaming and streaming modes
+	- `presence_penalty` env tuning (`LLM_PRESENCE_PENALTY`, default `1.5`)
+	- `chat_template_kwargs.enable_thinking=False`
 
-### Chunking and Indexing Pipeline
+### 4.4 Conversation-aware prompting
 
-- PDF ingestion
-	- Extract text page-by-page
-	- Chunk using `RecursiveCharacterTextSplitter`
-	- Deterministic chunk IDs (`md5(subject/file/chunk/text_prefix)`)
-- JSON ingestion
-	- Supports list or wrapped payloads (`chunks`, `data`, `items`, `documents`)
-	- Flexible text keys (`text`, `chunk`, `content`, `page_content`)
-	- Preserves metadata and chunk IDs (`id`, `id_`, `metadata.chunk_id`)
-- Upserts embeddings + payload to Qdrant
+- Processor keeps a short history window (`max_history_messages = 3` pairs)
+- History can be set/cleared by UI/API usage
+- Prompt template integrates context + optional prior turns
+- Sources are appended after generation
 
-### Caching and Optimizations
+### 4.5 Debug mode
 
-- Embedding model is loaded once and reused
-- Reranker is lazy-loaded
-- LLM instances cached by model key
-- API caches processor instances by `(subject, model)`
-- BM25 index built in memory from Qdrant for fast lexical retrieval
-
----
-
-## 5. Setup & Installation
-
-### Prerequisites
-
-- Python 3.10+ (3.11 recommended)
-- Docker + Docker Compose (recommended for full stack)
-- Qdrant available (local/container)
-- Optional: PostgreSQL for persistent conversations
-- Optional: Google API key for Gemini/fallback
-
-### Installation
-
-```bash
-git clone <your-repo-url>
-cd rag-pipeline
-
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### Environment variables
-
-Create `.env` in project root:
-
-```env
-# Core
-QDRANT_URL=http://localhost:6333
-QDRANT_COLLECTION=documents
-LLM_MODEL=gemini
-LLM_PROXY_URL=http://localhost:5000
-GOOGLE_API_KEY=your_google_api_key
-
-# DB (optional, Streamlit defaults to sqlite if unset in database layer)
-DATABASE_URL=sqlite:///./chatbot.db
-# or:
-# DATABASE_URL=postgresql://chatbot_user:chatbot_pass_2024@localhost:5432/chatbot_db
-
-# LLM params
-LLM_TEMPERATURE=0.7
-LLM_MAX_OUTPUT_TOKENS=2048
-
-# Retrieval / embedding tuning (processor.py)
-RAG_EMBEDDING_MODEL=BAAI/bge-m3
-RAG_EMBEDDING_LOCAL_PATH=./models/bge-m3
-RAG_HYBRID_TOP_K=20
-RAG_DENSE_TOP_K=20
-RAG_BM25_TOP_K=20
-RAG_HYBRID_ALPHA=0.7
-RAG_HYBRID_BETA=0.3
-RAG_RERANKER_MODEL=BAAI/bge-reranker-v2-m3
-RAG_RERANK_TOP_N=5
-RAG_RERANK_BATCH_SIZE=8
-RAG_DENSE_SCORE_THRESHOLD=0.3
-```
+- `get_response_with_debug()` returns:
+	- `answer`
+	- `debug_scores` (dense/bm25 normalized/raw scores, ranks, rerank score)
+	- `retrieval_meta` (hybrid mode, candidate counts)
+- API endpoint: `POST /query/debug`
 
 ---
 
-## 6. Usage
+## 5. Configuration
 
-### Option A: Docker Compose (recommended)
+Primary configuration lives in `src/config.py` plus retrieval/reranker env values read in `src/processor.py`.
 
-```bash
-docker compose -f docker/docker-compose.yml up -d --build
-```
+### 5.1 Core environment variables
 
-Expected services:
-- Streamlit app
-- RAG API
-- LLM proxy
-- Qdrant
-- PostgreSQL
+| Variable | Default | Used in | Description |
+|---|---|---|---|
+| `GOOGLE_API_KEY` | empty | config, proxy | Required for Gemini API and fallback |
+| `LLM_MODEL` | `gemini` | config | Active model key (`gemini`, `qwen3-8b`) |
+| `LLM_PROXY_URL` | `http://localhost:5000` | config, llm_manager | Proxy endpoint for proxy models |
+| `LLM_TEMPERATURE` | `0.7` | config | Generation temperature |
+| `LLM_MAX_OUTPUT_TOKENS` | `2048` | config | Max output tokens |
+| `LLM_PRESENCE_PENALTY` | `1.5` | llm_manager | Proxy request tuning (anti-repetition) |
+| `QDRANT_URL` | unset | config | Overrides Qdrant host/port parsing; if unset, config defaults to host=`qdrant`, port=`6333` |
+| `QDRANT_COLLECTION` | `documents` | config | Qdrant collection name |
+| `VLLM_MODEL_NAME` | `Qwen/Qwen3-8B-AWQ` | llm_proxy | Declared in proxy service config; request routing still uses incoming `request.model` |
 
-### Option B: Run services manually
+### 5.2 Retrieval and reranking environment variables
 
-#### 1) Start Qdrant
-Use Docker or your own Qdrant deployment.
+| Variable | Default | Description |
+|---|---|---|
+| `RAG_EMBEDDING_MODEL` | `BAAI/bge-m3` | Embedding model id |
+| `RAG_EMBEDDING_LOCAL_PATH` | `<cache>/bge-m3` | Local embedding model path |
+| `RAG_HYBRID_TOP_K` | `20` | Hybrid candidate count baseline |
+| `RAG_DENSE_TOP_K` | `RAG_HYBRID_TOP_K` | Dense candidate count |
+| `RAG_BM25_TOP_K` | `RAG_HYBRID_TOP_K` | BM25 candidate count |
+| `RAG_HYBRID_MODE` | `score` | Fusion mode (`score` or `rrf`) |
+| `RAG_HYBRID_ALPHA` | `0.7` | Dense weight in score fusion |
+| `RAG_HYBRID_BETA` | `0.3` | BM25 weight in score fusion |
+| `RAG_RRF_K` | `60` | RRF constant when `rrf` mode is enabled |
+| `RAG_HYBRID_MISSING_STRATEGY` | `zero` | Missing branch handling (`zero`, `min`, `epsilon`) |
+| `RAG_HYBRID_MISSING_EPSILON` | `0.01` | Epsilon for missing strategy |
+| `RAG_DENSE_SCORE_THRESHOLD` | `config.retrieval.score_threshold` | Dense threshold (`<=0` disables) |
+| `RAG_RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker model |
+| `RAG_RERANK_TOP_N` | `5` | Final selected chunks |
+| `RAG_RERANK_BATCH_SIZE` | `8` | Reranker batch size |
+| `RAG_RERANK_CANDIDATE_MULTIPLIER` | `1` | Candidate pool multiplier |
+| `RAG_RERANK_CANDIDATE_CAP` | `30` | Max candidate pool cap |
 
-#### 2) Start LLM proxy (optional for vLLM route)
-```bash
-python3 src/llm_proxy.py
-```
-
-#### 3) Start FastAPI RAG API
-```bash
-uvicorn src.api_service:app --host 0.0.0.0 --port 9100 --reload
-```
-
-#### 4) Start Streamlit UI
-```bash
-streamlit run src/app_v2.py
-```
-
-### Reload/index data
-
-```bash
-curl -X POST http://localhost:9100/reload \
-	-H "Content-Type: application/json" \
-	-d '{"clean": false}'
-```
-
-- `clean: true` recreates collection and reindexes all subjects.
-
-### Query API
-
-```bash
-curl -X POST http://localhost:9100/query \
-	-H "Content-Type: application/json" \
-	-d '{
-		"question": "Explain historical materialism",
-		"subject": "Môn Triết học Mác-Lênin",
-		"model_key": "gemini",
-		"use_history": true
-	}'
-```
-
-### Streaming API
-
-```bash
-curl -N -X POST http://localhost:9100/query/stream \
-	-H "Content-Type: application/json" \
-	-d '{
-		"question": "Summarize chapter 3",
-		"subject": null,
-		"model_key": "qwen2-7b",
-		"use_history": true
-	}'
-```
-
----
-
-## 7. Configuration
-
-Primary configuration is in `src/config.py`.
-
-### Config classes
-
-- `EmbeddingConfig`
-	- model location, batch size, cache folder
-- `QdrantConfig`
-	- host, port, collection name
-- `ChunkingConfig`
-	- chunk size, overlap, separators
-- `LLMConfig`
-	- active model, generation params, proxy URL
-- `RetrievalConfig`
-	- top-k, score threshold, max context length
-- `AppConfig`
-	- data and log folders, UI title/icon
-
-### Data layout conventions
-
-The processor expects:
+### 5.3 Data layout conventions
 
 ```text
 data/
@@ -364,51 +264,226 @@ data/
 		└── <subject>/*.json
 ```
 
-JSON chunks may include rich metadata. The pipeline keeps metadata and stores normalized fields (subject/page/chunk_id/source markers) in Qdrant payload.
+Both roots are scanned. Subjects are discovered by folder names under these roots.
 
 ---
 
-## 8. Advanced Features and Why They Help
+## 6. API Reference and Usage
 
-- Hybrid dense + BM25 retrieval
-	- Dense captures semantic similarity
-	- BM25 captures exact keyword overlap
-	- Fusion improves robustness across query types
+By default in Docker Compose, the API is exposed at `http://localhost:9100`.
 
-- Cross-encoder reranking
-	- Re-scores `(query, chunk)` pairs jointly
-	- Usually improves precision for final context shown to LLM
+### 6.1 Endpoints
 
-- Model and processor caching
-	- Reduces repeated initialization cost
-	- Improves latency under repeated requests
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Service health |
+| `GET` | `/models` | Available LLM model map |
+| `GET` | `/subjects` | Discovered subject list |
+| `POST` | `/query` | Normal QA response |
+| `POST` | `/query/debug` | QA response + retrieval debug table |
+| `POST` | `/query/stream` | SSE streaming response |
+| `POST` | `/reload` | Reindex documents |
 
-- Fallback-capable proxy
-	- Keeps service available when vLLM is down
-	- Automatic retries reduce transient failure impact
+### 6.2 Example: normal query
 
-- Incremental + full reindex modes
-	- `clean=false` for updates
-	- `clean=true` for full rebuilds after major model/schema changes
+Request:
 
-- Conversation-aware prompting
-	- Better continuity in multi-turn QA without a heavy long-term memory layer
+```bash
+curl -X POST http://localhost:9100/query \
+	-H "Content-Type: application/json" \
+	-d '{
+		"question": "What is gradient descent learning rate?",
+		"subject": null,
+		"model_key": "qwen3-8b",
+		"use_history": true,
+		"debug": false
+	}'
+```
+
+Response shape:
+
+```json
+{
+	"answer": "...model answer...\n\n📚 **Nguồn tham khảo:**\n- Subject / file.pdf / Trang 12",
+	"debug_scores": null,
+	"retrieval_meta": null
+}
+```
+
+### 6.3 Example: debug query
+
+Request:
+
+```bash
+curl -X POST http://localhost:9100/query/debug \
+	-H "Content-Type: application/json" \
+	-d '{
+		"question": "Explain logistic regression",
+		"subject": null,
+		"model_key": "gemini",
+		"use_history": true
+	}'
+```
+
+Response shape (truncated):
+
+```json
+{
+	"answer": "...",
+	"debug_scores": [
+		{
+			"rank": 1,
+			"hybrid_rank": 2,
+			"id": "chunk_id",
+			"dense_score": 0.81,
+			"bm25_score": 12.4,
+			"dense_norm": 0.93,
+			"bm25_norm": 0.74,
+			"hybrid_score": 0.87,
+			"rerank_score": 7.12,
+			"dense_rank": null,
+			"bm25_rank": null,
+			"rrf_score": null,
+			"text_preview": "..."
+		}
+	],
+	"retrieval_meta": {
+		"hybrid_mode": "score",
+		"hybrid_top_k": 20,
+		"rerank_top_n": 5,
+		"total_candidates": 20,
+		"selected_candidates": 5
+	}
+}
+```
+
+### 6.4 Example: stream query (SSE)
+
+```bash
+curl -N -X POST http://localhost:9100/query/stream \
+	-H "Content-Type: application/json" \
+	-d '{
+		"question": "Summarize chapter 3",
+		"subject": null,
+		"model_key": "qwen3-8b",
+		"use_history": true
+	}'
+```
+
+Stream event format:
+
+```text
+data: {"chunk":"partial text"}
+
+data: {"chunk":"more text"}
+
+data: {"done":true}
+```
+
+### 6.5 Example: reload index
+
+```bash
+curl -X POST http://localhost:9100/reload \
+	-H "Content-Type: application/json" \
+	-d '{"subject": null, "model_key": "gemini", "clean": false}'
+```
+
+- `clean=false`: incremental update
+- `clean=true`: delete/recreate collection then full reindex
 
 ---
 
-## Notes and Assumptions
+## 7. Running the System
 
-- This codebase currently uses single-vector dense embeddings + BM25, not multi-vector retrieval.
-- No explicit evaluation pipeline (e.g., benchmark scripts/metrics) is present in `src`.
-- Main UI and API coexist; choose one or both depending on deployment needs.
+### 7.1 Docker Compose (recommended)
+
+```bash
+docker compose -f docker/docker-compose.yml up -d --build
+```
+
+Expected services (from compose):
+
+- `postgres` (5432)
+- `qdrant` (6333)
+- `llm_proxy` (5000)
+- `app` Streamlit (8501)
+- `chatbot_api` FastAPI (9100 host -> 8000 container)
+
+Check status:
+
+```bash
+docker compose -f docker/docker-compose.yml ps
+```
+
+### 7.2 Manual run
+
+1. Install dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+2. Start Qdrant and database (docker or external deployment).
+
+3. Start proxy (for proxy model path):
+
+```bash
+python3 src/llm_proxy.py
+```
+
+4. Start API:
+
+```bash
+uvicorn src.api_service:app --host 0.0.0.0 --port 9100 --reload
+```
+
+5. Start UI:
+
+```bash
+streamlit run src/app_v2.py
+```
 
 ---
 
-## Quick Start Checklist
+## 8. Advanced Features and Why They Matter
 
-1. Configure `.env`
-2. Start Qdrant (and optional PostgreSQL)
-3. Start `src/llm_proxy.py` if using proxy model
-4. Start `src/api_service.py` and/or `src/app_v2.py`
-5. Call `/reload` once to ingest documents
-6. Query via UI or API
+- Hybrid retrieval (`score` / `rrf`):
+	- Better robustness across conceptual and keyword-heavy questions.
+- Configurable missing-branch behavior:
+	- Helps control bias when only dense or BM25 retrieves a chunk.
+- Candidate pool controls before reranking:
+	- Improves recall without always reranking too many noisy chunks.
+- Debug retrieval endpoint:
+	- Provides transparent score/rank traces for analysis and tuning.
+- Streaming support across layers:
+	- Better UX in both UI and API consumers.
+- Multi-layer caching:
+	- Embedding model cache, LLM cache, and processor cache reduce latency.
+- Proxy fallback strategy:
+	- Maintains service continuity when vLLM backend is unhealthy.
+
+---
+
+## 9. Notes and Assumptions
+
+- Current retrieval is single-vector dense + BM25 hybrid (no multi-vector retrieval path implemented in `src`).
+- The Streamlit UI in `src/app_v2.py` depends on external package directory `frontend/`.
+- FastAPI mounts `/widget` only if `widget/` exists.
+- In code, `LLM_MODEL` default is `gemini`; in Docker Compose for `app`, default is `qwen3-8b`.
+- Gemini fallback in proxy is enabled only when `GOOGLE_API_KEY` is set.
+
+---
+
+## 10. Quick Start Checklist
+
+1. Create and fill `.env` (`GOOGLE_API_KEY`, `QDRANT_URL`, `LLM_MODEL`, `LLM_PROXY_URL`).
+2. Start infrastructure (Qdrant, DB, and optionally full Docker Compose stack).
+3. Ensure data is placed in:
+	 - `data/source_docs/<subject>/*.pdf`
+	 - `data/processed_chunks/<subject>/*.json`
+4. Start proxy if using proxy models.
+5. Start API and/or Streamlit UI.
+6. Trigger `/reload` once.
+7. Run `/query` or `/query/debug` to validate retrieval and generation.

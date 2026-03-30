@@ -144,6 +144,16 @@ header[data-testid="stHeader"] {
     font-size: 12px !important;
 }
 
+[data-testid^="stButton"][key^="del_"] button {
+    background-color: #d1d5db !important;  /* màu xám nhạt (gray-300) */
+    color: #374151 !important;             /* màu xám đậm (gray-700) cho dấu ✕ */
+    border-radius: 4px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    font-size: 16px;
+}
+
 /* ── Chat messages ── */
 [data-testid="stChatMessage"] {
     background: transparent !important;
@@ -195,7 +205,7 @@ header[data-testid="stHeader"] {
 [data-testid="stBottom"] {
     background: var(--bg2) !important;
     border-top: 1px solid var(--bdr) !important;
-    padding: 10px 16px 14px !important;
+    padding: 10px 16px 8px !important; 
 }
 [data-testid="stChatInput"] > div {
     border-radius: 14px !important;
@@ -252,7 +262,11 @@ header[data-testid="stHeader"] {
     font-weight: 500;
     margin-bottom: 12px;
 }
+
 </style>
+
+
+
 """, unsafe_allow_html=True)
 
 
@@ -317,7 +331,9 @@ def render_sidebar_header():
         if logo_chatbot else
         '<div style="width:38px;height:38px;border-radius:10px;'
         'background:linear-gradient(135deg,#1a4a7a,#2563eb);'
-        'display:flex;align-items:center;justify-content:center;font-size:18px;">🎓</div>'
+        'display:flex;align-items:center;justify-content:center;">'
+        '<img src="" style="display:none"/>'
+        '</div>'
     )
     st.markdown(f"""
 <div style="

@@ -24,7 +24,7 @@
 - **Hỏi đáp đa môn học** — Tổ chức tài liệu theo từng môn (Giải tích 1, Thống kê trong kinh doanh, Vật lý 2, ...)
 - **Xác thực người dùng** — Đăng ký / đăng nhập bảo mật với bcrypt
 - **Quản lý hội thoại** — Lưu lịch sử chat, ghim, lưu trữ, xoá cuộc hội thoại
-- **Hybrid LLM** — Hỗ trợ Google Gemini API và local vLLM (Qwen 2.5-7B) với cơ chế fallback tự động
+- **Hybrid LLM** — Hỗ trợ Google Gemini API và local vLLM (Qwen3-8B-AWQ) với cơ chế fallback tự động
 - **Streaming Response** — Phản hồi theo thời gian thực
 - **Chia sẻ hội thoại** — Chia sẻ cuộc trò chuyện qua token bảo mật
 
@@ -82,7 +82,7 @@ Câu hỏi → Embedding (sentence-transformers) → Tìm kiếm Qdrant (top-K)
 | Layer | Công nghệ |
 |-------|-----------|
 | **Frontend** | Streamlit 1.49 |
-| **LLM Framework** | LangChain 0.2, Google Gemini 2.5 Flash, Qwen 2.5-7B (vLLM) |
+| **LLM Framework** | LangChain 0.2, Google Gemini 2.5 Flash, Qwen3-8B-AWQ (vLLM) |
 | **Embedding** | sentence-transformers (all-MiniLM-L6-v2) |
 | **Vector DB** | Qdrant |
 | **Database** | PostgreSQL 15 + SQLAlchemy ORM |
@@ -119,7 +119,7 @@ rag-pipeline/
 │   └── Vật lý 2/
 ├── models/                     # Pre-downloaded models
 │   ├── all-MiniLM-L6-v2/      # Embedding model
-│   └── llm/                    # LLM weights (Qwen 2.5-3B)
+│   └── llm/                    # LLM weights (Qwen3-8B-AWQ)
 ├── docker/
 │   ├── docker-compose.yml      # Multi-service orchestration
 │   ├── Dockerfile              # Main app image
