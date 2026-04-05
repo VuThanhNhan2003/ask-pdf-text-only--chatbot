@@ -1,5 +1,6 @@
 """
 Optimized RAG Processor with logging, better error handling, and performance improvements
+Metadata-enhanced: keywords/topic used for BM25 boosting, rerank boosting, and context enrichment
 """
 import hashlib
 import json
@@ -103,13 +104,26 @@ RERANK_CANDIDATE_CAP = int(os.getenv("RAG_RERANK_CANDIDATE_CAP", "30"))
 # Dense search threshold for Qdrant; set <=0 to disable thresholding.
 DENSE_SCORE_THRESHOLD = float(os.getenv("RAG_DENSE_SCORE_THRESHOLD", str(config.retrieval.score_threshold)))
 
+# =====================================================================
+# METADATA BOOSTING CONFIG
+# =====================================================================
+# BM25 weight multipliers for metadata fields
+BM25_KEYWORD_BOOST = int(os.getenv("RAG_BM25_KEYWORD_BOOST", "3"))   # repeat keywords N times in corpus
+BM25_TOPIC_BOOST   = int(os.getenv("RAG_BM25_TOPIC_BOOST", "2"))     # repeat topic tokens N times
+
+# Rerank score additive boosts
+RERANK_KEYWORD_BOOST_PER_MATCH = float(os.getenv("RAG_RERANK_KEYWORD_BOOST", "0.05"))
+RERANK_TOPIC_BOOST              = float(os.getenv("RAG_RERANK_TOPIC_BOOST", "0.10"))
+
+# Whether to include topic/keywords in LLM context
+CONTEXT_INCLUDE_METADATA = os.getenv("RAG_CONTEXT_INCLUDE_METADATA", "true").lower() == "true"
+
 
 # =====================================================================
 # UTILITY FUNCTIONS
 # =====================================================================
 def make_chunk_id(subject: str, filename: str, chunk_index: int, chunk_text: str) -> str:
     """Create a deterministic chunk ID based on file and content."""
-    # Include chunk index for better uniqueness
     raw = f"{subject}/{filename}/chunk_{chunk_index}/{chunk_text[:100]}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
@@ -209,7 +223,7 @@ def get_embedding_model() -> SentenceTransformer:
 # RAG PROCESSOR
 # =====================================================================
 class RAGProcessor:
-    """Optimized RAG Processor with streaming support"""
+    """Optimized RAG Processor with streaming support and metadata-enhanced retrieval"""
     
     def __init__(self, subject: Optional[str] = None, llm_model: Optional[str] = None):
         """Initialize the RAG processor for a specific subject."""
@@ -479,14 +493,32 @@ class RAGProcessor:
         else:
             chunk_id = make_chunk_id(subject, source_file, chunk_index, text)
 
+        # ── [METADATA] Preserve rich metadata fields ──────────────────
+        topic    = str(metadata.get("topic")    or item.get("topic")    or "").strip()
+        category = str(metadata.get("category") or item.get("category") or "").strip()
+        has_code = bool(metadata.get("has_code") or item.get("has_code") or False)
+
+        # keywords: list[str] from either metadata or top-level item
+        raw_keywords = metadata.get("keywords") or item.get("keywords") or []
+        if isinstance(raw_keywords, list):
+            keywords = [str(k).strip() for k in raw_keywords if k]
+        else:
+            keywords = []
+        # ────────────────────────────────────────────────────────────────
+
         merged_metadata: Dict[str, Any] = {**metadata}
-        merged_metadata["subject"] = subject
-        merged_metadata["file_name"] = source_file
+        merged_metadata["subject"]          = subject
+        merged_metadata["file_name"]        = source_file
         merged_metadata.pop("file", None)
-        merged_metadata["page"] = page
-        merged_metadata["chunk_id"] = chunk_id
-        merged_metadata["source_type"] = "json"
+        merged_metadata["page"]             = page
+        merged_metadata["chunk_id"]         = chunk_id
+        merged_metadata["source_type"]      = "json"
         merged_metadata["source_json_file"] = json_filename
+        # Always keep rich metadata
+        merged_metadata["topic"]            = topic
+        merged_metadata["category"]         = category
+        merged_metadata["keywords"]         = keywords
+        merged_metadata["has_code"]         = has_code
 
         return {
             "id": chunk_id,
@@ -601,11 +633,20 @@ class RAGProcessor:
                 payload = {"text": chunk["text"], **metadata}
 
                 payload["chunk_id"] = str(payload.get("chunk_id") or chunk["id"])
-                payload["subject"] = str(payload.get("subject") or "")
+                payload["subject"]  = str(payload.get("subject") or "")
+
                 try:
                     payload["page"] = int(payload.get("page", 0))
                 except (TypeError, ValueError):
                     payload["page"] = 0
+
+                # ── [METADATA] Ensure rich fields are persisted in Qdrant ──
+                payload["topic"]    = str(payload.get("topic")    or "")
+                payload["category"] = str(payload.get("category") or "")
+                payload["has_code"] = bool(payload.get("has_code") or False)
+                raw_kw = payload.get("keywords") or []
+                payload["keywords"] = raw_kw if isinstance(raw_kw, list) else []
+                # ────────────────────────────────────────────────────────────
 
                 source_type = str(payload.get("source_type") or "").lower()
                 resolved_file = str(payload.get("file_name") or payload.get("file") or "")
@@ -636,12 +677,32 @@ class RAGProcessor:
     # ================================================================
     # HYBRID RETRIEVAL + RERANKING
     # ================================================================
+
     @staticmethod
-    def _tokenize_for_bm25(text: str) -> List[str]:
-        """Simple Unicode-friendly tokenizer for lexical search."""
+    def _tokenize_for_bm25(text: str, payload: Optional[Dict[str, Any]] = None) -> List[str]:
+        """
+        Unicode-friendly tokenizer for lexical search.
+        [METADATA ENHANCEMENT] Boosts keywords and topic tokens by repeating them
+        in the token list so BM25 scores them higher when the query matches.
+        """
         if not text:
             return []
-        return re.findall(r"\w+", text.lower(), flags=re.UNICODE)
+        tokens = re.findall(r"\w+", text.lower(), flags=re.UNICODE)
+
+        if payload:
+            # Boost keywords (repeat BM25_KEYWORD_BOOST times)
+            keywords: List[str] = payload.get("keywords") or []
+            for kw in keywords:
+                kw_tokens = re.findall(r"\w+", str(kw).lower(), flags=re.UNICODE)
+                tokens.extend(kw_tokens * BM25_KEYWORD_BOOST)
+
+            # Boost topic (repeat BM25_TOPIC_BOOST times)
+            topic = str(payload.get("topic") or "")
+            if topic:
+                topic_tokens = re.findall(r"\w+", topic.lower(), flags=re.UNICODE)
+                tokens.extend(topic_tokens * BM25_TOPIC_BOOST)
+
+        return tokens
 
     @staticmethod
     def _minmax_normalize(scores: Dict[str, float]) -> Dict[str, float]:
@@ -686,8 +747,12 @@ class RAGProcessor:
         return self._reranker
 
     def _build_bm25_index_from_qdrant(self):
-        """Build in-memory BM25 index from existing Qdrant payloads."""
-        logger.info("📚 Building BM25 index from Qdrant payloads...")
+        """
+        Build in-memory BM25 index from existing Qdrant payloads.
+        [METADATA ENHANCEMENT] Passes full payload to tokenizer so that
+        keywords and topic are included (boosted) in each document's token list.
+        """
+        logger.info("📚 Building BM25 index from Qdrant payloads (with metadata boosting)...")
         start_time = time.time()
 
         docs: List[Dict[str, Any]] = []
@@ -710,18 +775,25 @@ class RAGProcessor:
                 for point in points:
                     payload = point.payload or {}
                     text = payload.get("text", "")
-                    tokens = self._tokenize_for_bm25(text)
+
+                    # Pass payload so tokenizer can boost keywords/topic
+                    tokens = self._tokenize_for_bm25(text, payload=payload)
                     if not tokens:
                         continue
 
                     chunk_id = str(payload.get("chunk_id") or point.id)
                     docs.append(
                         {
-                            "id": chunk_id,
-                            "text": text,
-                            "subject": payload.get("subject", ""),
-                            "file": payload.get("file_name") or payload.get("file", ""),
-                            "page": payload.get("page", 0),
+                            "id":       chunk_id,
+                            "text":     text,
+                            "subject":  payload.get("subject", ""),
+                            "file":     payload.get("file_name") or payload.get("file", ""),
+                            "page":     payload.get("page", 0),
+                            # [METADATA] carry through for retrieval result enrichment
+                            "topic":    payload.get("topic", ""),
+                            "category": payload.get("category", ""),
+                            "keywords": payload.get("keywords") or [],
+                            "has_code": payload.get("has_code", False),
                         }
                     )
                     tokenized_corpus.append(tokens)
@@ -773,12 +845,17 @@ class RAGProcessor:
                 payload = result.payload or {}
                 results.append(
                     {
-                        "id": str(payload.get("chunk_id") or result.id),
-                        "text": payload.get("text", ""),
-                        "subject": payload.get("subject", ""),
-                        "file": payload.get("file_name") or payload.get("file", ""),
-                        "page": payload.get("page", 0),
+                        "id":          str(payload.get("chunk_id") or result.id),
+                        "text":        payload.get("text", ""),
+                        "subject":     payload.get("subject", ""),
+                        "file":        payload.get("file_name") or payload.get("file", ""),
+                        "page":        payload.get("page", 0),
                         "dense_score": float(result.score),
+                        # [METADATA] carry through for downstream use
+                        "topic":       payload.get("topic", ""),
+                        "category":    payload.get("category", ""),
+                        "keywords":    payload.get("keywords") or [],
+                        "has_code":    payload.get("has_code", False),
                     }
                 )
 
@@ -788,7 +865,7 @@ class RAGProcessor:
             return []
 
     def retrieve_bm25(self, query: str, top_k: int = BM25_TOP_K) -> List[Dict[str, Any]]:
-        """Lexical retrieval using in-memory BM25 index."""
+        """Lexical retrieval using in-memory BM25 index (metadata-boosted)."""
         if self._bm25_index is None or not self._bm25_docs:
             return []
 
@@ -824,12 +901,17 @@ class RAGProcessor:
                 doc = self._bm25_docs[idx]
                 results.append(
                     {
-                        "id": doc["id"],
-                        "text": doc["text"],
-                        "subject": doc["subject"],
-                        "file": doc["file"],
-                        "page": doc["page"],
+                        "id":         doc["id"],
+                        "text":       doc["text"],
+                        "subject":    doc["subject"],
+                        "file":       doc["file"],
+                        "page":       doc["page"],
                         "bm25_score": score,
+                        # [METADATA] carry through
+                        "topic":      doc.get("topic", ""),
+                        "category":   doc.get("category", ""),
+                        "keywords":   doc.get("keywords") or [],
+                        "has_code":   doc.get("has_code", False),
                     }
                 )
 
@@ -841,7 +923,7 @@ class RAGProcessor:
     def hybrid_retrieve(self, query: str, top_k: int = HYBRID_TOP_K) -> List[Dict[str, Any]]:
         """Hybrid retrieval: dense + BM25 with weighted score fusion."""
         dense_results = self.retrieve_dense(query, top_k=DENSE_TOP_K)
-        bm25_results = self.retrieve_bm25(query, top_k=BM25_TOP_K)
+        bm25_results  = self.retrieve_bm25(query, top_k=BM25_TOP_K)
 
         if not dense_results and not bm25_results:
             return []
@@ -853,13 +935,13 @@ class RAGProcessor:
     def _hybrid_retrieve_rrf(
         self,
         dense_results: List[Dict[str, Any]],
-        bm25_results: List[Dict[str, Any]],
+        bm25_results:  List[Dict[str, Any]],
         top_k: int,
     ) -> List[Dict[str, Any]]:
         """Rank-based fusion using Reciprocal Rank Fusion (RRF)."""
         merged: Dict[str, Dict[str, Any]] = {}
         dense_rank_map: Dict[str, int] = {}
-        bm25_rank_map: Dict[str, int] = {}
+        bm25_rank_map:  Dict[str, int] = {}
 
         for rank, item in enumerate(dense_results, start=1):
             item_id = item["id"]
@@ -872,25 +954,30 @@ class RAGProcessor:
             bm25_rank_map[item_id] = rank
             if item_id not in merged:
                 merged[item_id] = {**item}
-            elif not merged[item_id].get("text") and item.get("text"):
-                merged[item_id]["text"] = item["text"]
+            else:
+                if not merged[item_id].get("text") and item.get("text"):
+                    merged[item_id]["text"] = item["text"]
+                # [METADATA] merge metadata from bm25 branch if missing
+                for mf in ("topic", "category", "keywords", "has_code"):
+                    if not merged[item_id].get(mf) and item.get(mf):
+                        merged[item_id][mf] = item[mf]
 
         k = max(1, RRF_K)
         for item_id, doc in merged.items():
             dense_rank = dense_rank_map.get(item_id)
-            bm25_rank = bm25_rank_map.get(item_id)
+            bm25_rank  = bm25_rank_map.get(item_id)
 
-            dense_rrf = 1.0 / (k + dense_rank) if dense_rank is not None else 0.0
-            bm25_rrf = 1.0 / (k + bm25_rank) if bm25_rank is not None else 0.0
+            dense_rrf    = 1.0 / (k + dense_rank) if dense_rank is not None else 0.0
+            bm25_rrf     = 1.0 / (k + bm25_rank)  if bm25_rank  is not None else 0.0
             hybrid_score = dense_rrf + bm25_rrf
 
-            doc["dense_score"] = float(doc.get("dense_score", 0.0))
-            doc["bm25_score"] = float(doc.get("bm25_score", 0.0))
-            doc["dense_norm"] = None
-            doc["bm25_norm"] = None
-            doc["dense_rank"] = dense_rank
-            doc["bm25_rank"] = bm25_rank
-            doc["rrf_score"] = hybrid_score
+            doc["dense_score"]  = float(doc.get("dense_score", 0.0))
+            doc["bm25_score"]   = float(doc.get("bm25_score",  0.0))
+            doc["dense_norm"]   = None
+            doc["bm25_norm"]    = None
+            doc["dense_rank"]   = dense_rank
+            doc["bm25_rank"]    = bm25_rank
+            doc["rrf_score"]    = hybrid_score
             doc["hybrid_score"] = hybrid_score
 
         ranked = sorted(merged.values(), key=lambda x: x.get("hybrid_score", 0.0), reverse=True)
@@ -912,14 +999,14 @@ class RAGProcessor:
     def _hybrid_retrieve_score_fusion(
         self,
         dense_results: List[Dict[str, Any]],
-        bm25_results: List[Dict[str, Any]],
+        bm25_results:  List[Dict[str, Any]],
         top_k: int,
     ) -> List[Dict[str, Any]]:
         """Score-based hybrid retrieval: normalized dense + BM25 weighted fusion."""
 
         merged: Dict[str, Dict[str, Any]] = {}
-        dense_scores: Dict[str, float] = {}
-        bm25_scores: Dict[str, float] = {}
+        dense_scores: Dict[str, float]    = {}
+        bm25_scores:  Dict[str, float]    = {}
 
         for item in dense_results:
             item_id = item["id"]
@@ -931,31 +1018,30 @@ class RAGProcessor:
             if item_id not in merged:
                 merged[item_id] = {**item}
             else:
-                # Keep richer metadata/text from whichever branch has it.
                 if not merged[item_id].get("text") and item.get("text"):
                     merged[item_id]["text"] = item["text"]
+                # [METADATA] merge metadata from bm25 branch if missing
+                for mf in ("topic", "category", "keywords", "has_code"):
+                    if not merged[item_id].get(mf) and item.get(mf):
+                        merged[item_id][mf] = item[mf]
             bm25_scores[item_id] = float(item.get("bm25_score", 0.0))
 
         dense_norm = self._minmax_normalize(dense_scores)
-        bm25_norm = self._minmax_normalize(bm25_scores)
+        bm25_norm  = self._minmax_normalize(bm25_scores)
 
         missing_strategy = HYBRID_MISSING_STRATEGY
         if missing_strategy not in {"zero", "min", "epsilon"}:
             missing_strategy = "zero"
 
         dense_default = self._resolve_missing_default(
-            dense_norm,
-            strategy=missing_strategy,
-            epsilon=HYBRID_MISSING_EPSILON,
+            dense_norm, strategy=missing_strategy, epsilon=HYBRID_MISSING_EPSILON,
         )
         bm25_default = self._resolve_missing_default(
-            bm25_norm,
-            strategy=missing_strategy,
-            epsilon=HYBRID_MISSING_EPSILON,
+            bm25_norm, strategy=missing_strategy, epsilon=HYBRID_MISSING_EPSILON,
         )
 
         alpha = max(0.0, HYBRID_ALPHA)
-        beta = max(0.0, HYBRID_BETA)
+        beta  = max(0.0, HYBRID_BETA)
         total = alpha + beta
         if total <= 0:
             alpha, beta = 0.5, 0.5
@@ -963,26 +1049,36 @@ class RAGProcessor:
             alpha, beta = alpha / total, beta / total
 
         for item_id, doc in merged.items():
-            d_score = dense_norm.get(item_id, dense_default)
-            b_score = bm25_norm.get(item_id, bm25_default)
+            d_score      = dense_norm.get(item_id, dense_default)
+            b_score      = bm25_norm.get(item_id, bm25_default)
             hybrid_score = alpha * d_score + beta * b_score
-            doc["dense_score"] = dense_scores.get(item_id, 0.0)
-            doc["bm25_score"] = bm25_scores.get(item_id, 0.0)
-            doc["dense_norm"] = d_score
-            doc["bm25_norm"] = b_score
+            doc["dense_score"]  = dense_scores.get(item_id, 0.0)
+            doc["bm25_score"]   = bm25_scores.get(item_id, 0.0)
+            doc["dense_norm"]   = d_score
+            doc["bm25_norm"]    = b_score
             doc["hybrid_score"] = hybrid_score
 
         ranked = sorted(merged.values(), key=lambda x: x.get("hybrid_score", 0.0), reverse=True)
         return ranked[:top_k]
 
-    def rerank(self, query: str, candidates: List[Dict[str, Any]], top_n: int = RERANK_TOP_N_DEFAULT) -> List[Dict[str, Any]]:
-        """Cross-encoder reranking for final context selection."""
+    def rerank(
+        self,
+        query: str,
+        candidates: List[Dict[str, Any]],
+        top_n: int = RERANK_TOP_N_DEFAULT,
+    ) -> List[Dict[str, Any]]:
+        """
+        Cross-encoder reranking for final context selection.
+        [METADATA ENHANCEMENT] After cross-encoder scores are computed, applies
+        additive boosts when chunk keywords or topic words appear in the query.
+        This helps the reranker surface topically precise chunks over generic ones.
+        """
         if not candidates:
             return []
 
         try:
             reranker = self._load_reranker()
-            pairs = [(query, item.get("text", "")) for item in candidates]
+            pairs    = [(query, item.get("text", "")) for item in candidates]
 
             scores = reranker.predict(
                 pairs,
@@ -992,11 +1088,37 @@ class RAGProcessor:
 
             # CrossEncoder may return np.ndarray with shape (n,) or (n,1)
             scores = np.asarray(scores).reshape(-1)
+
+            query_lower = query.lower()
+
             for item, score in zip(candidates, scores):
-                item["rerank_score"] = float(score)
+                base_score = float(score)
+
+                # ── [METADATA] keyword boost ─────────────────────────
+                keywords: List[str] = item.get("keywords") or []
+                keyword_boost = sum(
+                    RERANK_KEYWORD_BOOST_PER_MATCH
+                    for kw in keywords
+                    if str(kw).lower() in query_lower
+                )
+
+                # ── [METADATA] topic boost ───────────────────────────
+                topic = str(item.get("topic") or "")
+                topic_boost = 0.0
+                if topic:
+                    topic_words = re.findall(r"\w+", topic.lower(), flags=re.UNICODE)
+                    if any(tw in query_lower for tw in topic_words if len(tw) > 2):
+                        topic_boost = RERANK_TOPIC_BOOST
+                # ────────────────────────────────────────────────────────
+
+                item["rerank_score"]         = base_score + keyword_boost + topic_boost
+                item["rerank_score_raw"]      = base_score
+                item["rerank_keyword_boost"]  = keyword_boost
+                item["rerank_topic_boost"]    = topic_boost
 
             reranked = sorted(candidates, key=lambda x: x.get("rerank_score", -1e9), reverse=True)
             return reranked[:top_n]
+
         except Exception as e:
             logger.error(f"Failed reranking: {e}", exc_info=True)
             # Safe fallback: use hybrid ranking only.
@@ -1041,19 +1163,16 @@ class RAGProcessor:
     def _retrieve_relevant_chunks(self, query: str, k: int = None) -> List[Dict]:
         """Retrieve relevant chunks with hybrid retrieval and reranking."""
         final_top_n = k if k is not None else RERANK_TOP_N_DEFAULT
-        multiplier = max(1, RERANK_CANDIDATE_MULTIPLIER)
-        cap = max(final_top_n, RERANK_CANDIDATE_CAP)
-        # Keep candidate pool wider than final top-n, but avoid adding too many noisy negatives.
+        multiplier  = max(1, RERANK_CANDIDATE_MULTIPLIER)
+        cap         = max(final_top_n, RERANK_CANDIDATE_CAP)
         candidate_k = max(HYBRID_TOP_K, min(cap, final_top_n * multiplier))
 
         try:
-            # Stage 1: hybrid dense + BM25 retrieval
             hybrid_candidates = self.hybrid_retrieve(query, top_k=candidate_k)
             if not hybrid_candidates:
                 logger.info("🔍 Hybrid retrieval returned 0 candidates")
                 return []
 
-            # Stage 2: rerank top-k candidates, return top-n
             relevant_chunks = self.rerank(query, hybrid_candidates, top_n=final_top_n)
 
             logger.info(
@@ -1077,30 +1196,37 @@ class RAGProcessor:
         rows: List[Dict[str, Any]] = []
 
         for rerank_rank, item in enumerate(reranked_candidates, start=1):
-            text = str(item.get("text", ""))
+            text         = str(item.get("text", ""))
             text_preview = " ".join(text.split())[:240]
-            item_id = item.get("id")
+            item_id      = item.get("id")
 
             rows.append(
                 {
-                    "rank": rerank_rank,
-                    "rerank_rank": rerank_rank,
-                    "hybrid_rank": hybrid_rank_map.get(item_id),
-                    "selected_for_context": item_id in selected_chunk_ids,
-                    "id": item_id,
-                    "subject": item.get("subject", ""),
-                    "file": item.get("file", ""),
-                    "page": item.get("page", 0),
-                    "dense_score": item.get("dense_score"),
-                    "bm25_score": item.get("bm25_score"),
-                    "dense_norm": item.get("dense_norm"),
-                    "bm25_norm": item.get("bm25_norm"),
-                    "hybrid_score": item.get("hybrid_score"),
-                    "rerank_score": item.get("rerank_score"),
-                    "dense_rank": item.get("dense_rank"),
-                    "bm25_rank": item.get("bm25_rank"),
-                    "rrf_score": item.get("rrf_score"),
-                    "text_preview": text_preview,
+                    "rank":                  rerank_rank,
+                    "rerank_rank":           rerank_rank,
+                    "hybrid_rank":           hybrid_rank_map.get(item_id),
+                    "selected_for_context":  item_id in selected_chunk_ids,
+                    "id":                    item_id,
+                    "subject":               item.get("subject", ""),
+                    "file":                  item.get("file", ""),
+                    "page":                  item.get("page", 0),
+                    "dense_score":           item.get("dense_score"),
+                    "bm25_score":            item.get("bm25_score"),
+                    "dense_norm":            item.get("dense_norm"),
+                    "bm25_norm":             item.get("bm25_norm"),
+                    "hybrid_score":          item.get("hybrid_score"),
+                    "rerank_score":          item.get("rerank_score"),
+                    "rerank_score_raw":      item.get("rerank_score_raw"),
+                    "rerank_keyword_boost":  item.get("rerank_keyword_boost"),
+                    "rerank_topic_boost":    item.get("rerank_topic_boost"),
+                    "dense_rank":            item.get("dense_rank"),
+                    "bm25_rank":             item.get("bm25_rank"),
+                    "rrf_score":             item.get("rrf_score"),
+                    # [METADATA] expose in debug table
+                    "topic":                 item.get("topic", ""),
+                    "category":              item.get("category", ""),
+                    "keywords":              item.get("keywords") or [],
+                    "text_preview":          text_preview,
                 }
             )
 
@@ -1113,8 +1239,8 @@ class RAGProcessor:
     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Retrieve chunks and return a debug table of per-chunk scores."""
         final_top_n = k if k is not None else RERANK_TOP_N_DEFAULT
-        multiplier = max(1, RERANK_CANDIDATE_MULTIPLIER)
-        cap = max(final_top_n, RERANK_CANDIDATE_CAP)
+        multiplier  = max(1, RERANK_CANDIDATE_MULTIPLIER)
+        cap         = max(final_top_n, RERANK_CANDIDATE_CAP)
         candidate_k = max(HYBRID_TOP_K, min(cap, final_top_n * multiplier))
 
         try:
@@ -1221,9 +1347,8 @@ class RAGProcessor:
     Câu trả lời của bạn:
     """
         
-        # Dynamic text based on history usage
-        question_label = " hiện tại của người dùng" if use_history else " của người dùng"
-        history_instruction = "2. Tham khảo lịch sử hội thoại nếu câu hỏi hiện tại liên quan đến câu hỏi trước.\n" if use_history else ""
+        question_label       = " hiện tại của người dùng" if use_history else " của người dùng"
+        history_instruction  = "2. Tham khảo lịch sử hội thoại nếu câu hỏi hiện tại liên quan đến câu hỏi trước.\n" if use_history else ""
         
         return prompt_template.format(
             history_section=history_section,
@@ -1233,25 +1358,8 @@ class RAGProcessor:
             history_instruction=history_instruction
         )
 
-    # Cập nhật các phương thức gọi:
     def get_response(self, query: str, use_history: bool = True) -> str:
         """Get response for query (non-streaming)"""
-        import time
-        t0 = time.time()
-
-        relevant_chunks = self._retrieve_relevant_chunks(query)
-        t1 = time.time()
-        logger.info(f"⏱️ Retrieval+Rerank: {t1-t0:.2f}s | chunks={len(relevant_chunks)}")
-
-        context = self._build_context(relevant_chunks)
-        prompt = self._build_prompt(context, query, use_history=use_history)
-        t2 = time.time()
-
-        response = self.llm.invoke(prompt)
-        t3 = time.time()
-        logger.info(f"⏱️ LLM generate: {t3-t2:.2f}s | prompt_chars={len(prompt)}")
-        logger.info(f"⏱️ Total get_response: {t3-t0:.2f}s")    
-            
         logger.info(f"💬 Processing query with {self.llm_model_key}: {query[:100]}...")
         start_time = time.time()
         
@@ -1266,7 +1374,7 @@ class RAGProcessor:
                 return response
 
             context = self._build_context(relevant_chunks)
-            prompt = self._build_prompt(context, query, use_history=use_history)
+            prompt  = self._build_prompt(context, query, use_history=use_history)
             
             response = self.llm.invoke(prompt)
             
@@ -1276,7 +1384,7 @@ class RAGProcessor:
                 self._add_to_history("assistant", response)
             
             # Add sources
-            sources_text = self._format_sources(relevant_chunks)
+            sources_text  = self._format_sources(relevant_chunks)
             full_response = f"{response}\n\n{sources_text}"
             
             elapsed = time.time() - start_time
@@ -1308,22 +1416,22 @@ class RAGProcessor:
                     "answer": response,
                     "debug_scores": debug_rows,
                     "retrieval_meta": {
-                        "hybrid_mode": HYBRID_MODE,
-                        "hybrid_top_k": HYBRID_TOP_K,
-                        "rerank_top_n": RERANK_TOP_N_DEFAULT,
+                        "hybrid_mode":    HYBRID_MODE,
+                        "hybrid_top_k":   HYBRID_TOP_K,
+                        "rerank_top_n":   RERANK_TOP_N_DEFAULT,
                         "total_candidates": len(debug_rows),
                     },
                 }
 
-            context = self._build_context(relevant_chunks)
-            prompt = self._build_prompt(context, query, use_history=use_history)
+            context  = self._build_context(relevant_chunks)
+            prompt   = self._build_prompt(context, query, use_history=use_history)
             response = self.llm.invoke(prompt)
 
             if use_history:
                 self._add_to_history("user", query)
                 self._add_to_history("assistant", response)
 
-            sources_text = self._format_sources(relevant_chunks)
+            sources_text  = self._format_sources(relevant_chunks)
             full_response = f"{response}\n\n{sources_text}"
 
             elapsed = time.time() - start_time
@@ -1333,10 +1441,10 @@ class RAGProcessor:
                 "answer": full_response,
                 "debug_scores": debug_rows,
                 "retrieval_meta": {
-                    "hybrid_mode": HYBRID_MODE,
-                    "hybrid_top_k": HYBRID_TOP_K,
-                    "rerank_top_n": RERANK_TOP_N_DEFAULT,
-                    "total_candidates": len(debug_rows),
+                    "hybrid_mode":        HYBRID_MODE,
+                    "hybrid_top_k":       HYBRID_TOP_K,
+                    "rerank_top_n":       RERANK_TOP_N_DEFAULT,
+                    "total_candidates":   len(debug_rows),
                     "selected_candidates": len(relevant_chunks),
                 },
             }
@@ -1351,13 +1459,12 @@ class RAGProcessor:
                 "answer": error_response,
                 "debug_scores": [],
                 "retrieval_meta": {
-                    "hybrid_mode": HYBRID_MODE,
-                    "hybrid_top_k": HYBRID_TOP_K,
-                    "rerank_top_n": RERANK_TOP_N_DEFAULT,
+                    "hybrid_mode":      HYBRID_MODE,
+                    "hybrid_top_k":     HYBRID_TOP_K,
+                    "rerank_top_n":     RERANK_TOP_N_DEFAULT,
                     "total_candidates": 0,
                 },
             }
-
 
     def get_response_stream(self, query: str, use_history: bool = True) -> Generator[str, None, None]:
         """Get streaming response for query"""
@@ -1374,7 +1481,7 @@ class RAGProcessor:
                 return
 
             context = self._build_context(relevant_chunks)
-            prompt = self._build_prompt(context, query, use_history=use_history)
+            prompt  = self._build_prompt(context, query, use_history=use_history)
             
             # Stream response and collect full response
             full_response = ""
@@ -1398,16 +1505,36 @@ class RAGProcessor:
                 self._add_to_history("user", query)
                 self._add_to_history("assistant", error_msg)
             yield error_msg
-    
 
     def _build_context(self, chunks: List[Dict]) -> str:
-        """Build context from relevant chunks"""
+        """
+        Build context from relevant chunks.
+        [METADATA ENHANCEMENT] When CONTEXT_INCLUDE_METADATA is True, prepends
+        topic and keywords to each chunk so the LLM has richer signal about
+        what the passage covers — improving answer_correctness and faithfulness.
+        """
         context_parts = []
-        total_length = 0
+        total_length  = 0
         
         for chunk in chunks:
             source_info = f"[{chunk['subject']} - {chunk['file']} - Trang {chunk['page']}]"
-            chunk_text = f"{source_info}\n{chunk['text']}"
+
+            # ── [METADATA] Optional metadata hints for LLM ───────────
+            meta_hint = ""
+            if CONTEXT_INCLUDE_METADATA:
+                topic    = str(chunk.get("topic")    or "").strip()
+                keywords = chunk.get("keywords") or []
+                category = str(chunk.get("category") or "").strip()
+
+                if topic:
+                    meta_hint += f"Chủ đề: {topic}\n"
+                if category:
+                    meta_hint += f"Phân loại: {category}\n"
+                if keywords:
+                    meta_hint += f"Từ khóa: {', '.join(str(k) for k in keywords)}\n"
+            # ────────────────────────────────────────────────────────────
+
+            chunk_text = f"{source_info}\n{meta_hint}{chunk['text']}"
             
             # Check context length limit
             if total_length + len(chunk_text) > config.retrieval.max_context_length:
@@ -1420,7 +1547,7 @@ class RAGProcessor:
 
     def _format_sources(self, chunks: List[Dict]) -> str:
         """Format sources information"""
-        seen = set()
+        seen    = set()
         sources = []
         
         for chunk in chunks:
@@ -1455,12 +1582,12 @@ class RAGProcessor:
     @staticmethod
     def get_subject_files(subject: str) -> List[str]:
         """Get list of source files (PDF/JSON) for a subject."""
-        source_docs_path = os.path.join(config.app.data_folder, "source_docs", subject)
-        processed_chunks_path = os.path.join(config.app.data_folder, "processed_chunks", subject)
+        source_docs_path      = os.path.join(config.app.data_folder, "source_docs",        subject)
+        processed_chunks_path = os.path.join(config.app.data_folder, "processed_chunks",   subject)
 
         files: List[str] = []
         if os.path.isdir(source_docs_path):
-            files.extend([f for f in os.listdir(source_docs_path) if f.lower().endswith(".pdf")])
+            files.extend([f for f in os.listdir(source_docs_path)      if f.lower().endswith(".pdf")])
         if os.path.isdir(processed_chunks_path):
             files.extend([f for f in os.listdir(processed_chunks_path) if f.lower().endswith(".json")])
 
