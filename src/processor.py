@@ -97,6 +97,12 @@ HYBRID_MISSING_EPSILON = float(os.getenv("RAG_HYBRID_MISSING_EPSILON", "0.01"))
 
 # Reranking knobs
 RERANKER_MODEL_NAME = os.getenv("RAG_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+RERANK_BACKEND = os.getenv("RAG_RERANK_BACKEND", "torch").strip().lower()
+RERANK_FALLBACK_BACKENDS = [
+    b.strip().lower()
+    for b in os.getenv("RAG_RERANK_FALLBACK_BACKENDS", "onnx,openvino,torch").split(",")
+    if b.strip()
+]
 RERANK_TOP_N_DEFAULT = int(os.getenv("RAG_RERANK_TOP_N", str(config.retrieval.top_k)))
 RERANK_BATCH_SIZE = int(os.getenv("RAG_RERANK_BATCH_SIZE", "8"))
 RERANK_CANDIDATE_MULTIPLIER = int(os.getenv("RAG_RERANK_CANDIDATE_MULTIPLIER", "1"))
@@ -735,31 +741,66 @@ class RAGProcessor:
     def _load_reranker(self) -> CrossEncoder:
         """Lazy-load reranker to keep startup memory low."""
         if self._reranker is None:
-            logger.info(f"📥 Loading reranker model: {RERANKER_MODEL_NAME}")
-            try:
-                self._reranker = CrossEncoder(
-                    RERANKER_MODEL_NAME,
-                    device=self._reranker_device,
-                    max_length=512,
-                    model_kwargs={
-                        "low_cpu_mem_usage": False,
-                        "device_map": None,
-                    },
-                )
-            except Exception as rerank_exc:
-                if "meta tensor" in str(rerank_exc).lower():
+            logger.info(
+                "📥 Loading reranker model: %s (preferred backend=%s)",
+                RERANKER_MODEL_NAME,
+                RERANK_BACKEND,
+            )
+
+            supported_backends = {"torch", "onnx", "openvino"}
+            backend_order: List[str] = []
+
+            if RERANK_BACKEND in supported_backends:
+                backend_order.append(RERANK_BACKEND)
+            for backend in RERANK_FALLBACK_BACKENDS:
+                if backend in supported_backends and backend not in backend_order:
+                    backend_order.append(backend)
+            if "torch" not in backend_order:
+                backend_order.append("torch")
+
+            last_error: Optional[Exception] = None
+            for backend in backend_order:
+                try:
+                    kwargs: Dict[str, Any] = {
+                        "max_length": 512,
+                        "backend": backend,
+                    }
+
+                    if backend == "torch":
+                        kwargs["device"] = self._reranker_device
+                        kwargs["model_kwargs"] = {
+                            "low_cpu_mem_usage": False,
+                            "device_map": None,
+                        }
+                    else:
+                        kwargs["device"] = "cpu"
+
+                    self._reranker = CrossEncoder(RERANKER_MODEL_NAME, **kwargs)
+                    logger.info("✅ Reranker loaded with backend=%s", backend)
+                    break
+                except Exception as rerank_exc:
+                    last_error = rerank_exc
                     logger.warning(
-                        "⚠️ Reranker meta-tensor error. Falling back to lightweight reranker on CPU: %s",
+                        "⚠️ Failed to load reranker with backend=%s: %s",
+                        backend,
                         rerank_exc,
                     )
+
+            if self._reranker is None:
+                logger.warning(
+                    "⚠️ All requested reranker backends failed. Falling back to lightweight reranker on CPU."
+                )
+                try:
                     self._reranker = CrossEncoder(
                         "cross-encoder/ms-marco-MiniLM-L-6-v2",
                         device="cpu",
                         max_length=512,
                     )
-                else:
+                    logger.info("✅ Fallback reranker loaded with backend=torch")
+                except Exception:
+                    if last_error is not None:
+                        raise last_error
                     raise
-            logger.info("✅ Reranker loaded")
         return self._reranker
 
     def _build_bm25_index_from_qdrant(self):
