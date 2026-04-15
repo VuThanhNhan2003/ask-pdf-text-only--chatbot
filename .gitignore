@@ -22,7 +22,7 @@ test/
 *.log
 src/app.py
 vpn_config/
-scripts/
+scripts/_pycache_
 evaluation/
 evaluation_reports/
 frontend/logo_image/

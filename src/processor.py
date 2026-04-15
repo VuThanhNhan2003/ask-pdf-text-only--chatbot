@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shutil
+import threading
 import time
 from typing import Any, Dict, List, Optional, Generator
 from datetime import datetime
@@ -117,6 +118,13 @@ RERANK_TOPIC_BOOST              = float(os.getenv("RAG_RERANK_TOPIC_BOOST", "0.1
 
 # Whether to include topic/keywords in LLM context
 CONTEXT_INCLUDE_METADATA = os.getenv("RAG_CONTEXT_INCLUDE_METADATA", "true").lower() == "true"
+ALLOW_QUERY_DURING_RELOAD = os.getenv("RAG_ALLOW_QUERY_DURING_RELOAD", "false").lower() == "true"
+LOG_RETRIEVAL_TIMING = os.getenv("RAG_LOG_RETRIEVAL_TIMING", "true").lower() == "true"
+
+# Qdrant request resilience
+QDRANT_SEARCH_MAX_RETRIES = int(os.getenv("RAG_QDRANT_SEARCH_MAX_RETRIES", "3"))
+QDRANT_RETRY_BASE_SECONDS = float(os.getenv("RAG_QDRANT_RETRY_BASE_SECONDS", "0.4"))
+QDRANT_RETRY_MAX_SECONDS = float(os.getenv("RAG_QDRANT_RETRY_MAX_SECONDS", "2.0"))
 
 
 # =====================================================================
@@ -275,7 +283,11 @@ class RAGProcessor:
             
             # Initialize conversation history
             self.conversation_history: List[Dict[str, str]] = []
-            self.max_history_messages = 3  # Giữ tối đa 3 cặp hội thoại
+            self.max_history_messages = 2  # Giữ tối đa 2 cặp hội thoại
+
+            # Guard queries while a long reload operation is running.
+            self._reload_lock = threading.RLock()
+            self._reload_in_progress = False
             
             # Ensure collection exists
             self._ensure_collection()
@@ -289,6 +301,10 @@ class RAGProcessor:
         except Exception as e:
             logger.error(f"Failed to initialize RAGProcessor: {e}")
             raise
+
+    def _is_query_blocked_by_reload(self) -> bool:
+        """Return True when queries should be temporarily blocked during reload."""
+        return self._reload_in_progress and not ALLOW_QUERY_DURING_RELOAD
 
     # ================================================================
     # COLLECTION MANAGEMENT
@@ -815,6 +831,37 @@ class RAGProcessor:
             self._bm25_tokenized_corpus = []
             self._bm25_index = None
 
+    @staticmethod
+    def _is_transient_qdrant_error(error: Exception) -> bool:
+        """Heuristic check for temporary Qdrant/network errors worth retrying."""
+        msg = str(error).lower()
+        cls = error.__class__.__name__.lower()
+
+        class_markers = [
+            "responsehandlingexception",
+            "remoteprotocolerror",
+            "connecttimeout",
+            "readtimeout",
+            "networkerror",
+            "transporterror",
+        ]
+        message_markers = [
+            "server disconnected without sending a response",
+            "connection reset",
+            "connection refused",
+            "temporarily unavailable",
+            "timed out",
+            "timeout",
+            "broken pipe",
+            "502",
+            "503",
+            "504",
+        ]
+
+        return any(marker in cls for marker in class_markers) or any(
+            marker in msg for marker in message_markers
+        )
+
     def retrieve_dense(self, query: str, top_k: int = DENSE_TOP_K) -> List[Dict[str, Any]]:
         """Dense retrieval from Qdrant."""
         try:
@@ -832,13 +879,38 @@ class RAGProcessor:
                 )
 
             threshold = DENSE_SCORE_THRESHOLD if DENSE_SCORE_THRESHOLD > 0 else None
-            search_results = self.qdrant_client.search(
-                collection_name=self.collection_name,
-                query_vector=query_embedding.tolist(),
-                limit=top_k,
-                query_filter=query_filter,
-                score_threshold=threshold,
-            )
+            search_results = None
+            max_attempts = max(1, QDRANT_SEARCH_MAX_RETRIES)
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    search_results = self.qdrant_client.search(
+                        collection_name=self.collection_name,
+                        query_vector=query_embedding.tolist(),
+                        limit=top_k,
+                        query_filter=query_filter,
+                        score_threshold=threshold,
+                    )
+                    break
+                except Exception as search_error:
+                    is_transient = self._is_transient_qdrant_error(search_error)
+                    if not is_transient or attempt >= max_attempts:
+                        raise
+
+                    sleep_seconds = min(
+                        QDRANT_RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
+                        QDRANT_RETRY_MAX_SECONDS,
+                    )
+                    logger.warning(
+                        "Qdrant dense search transient failure (attempt %s/%s): %s. Retrying in %.2fs",
+                        attempt,
+                        max_attempts,
+                        search_error,
+                        sleep_seconds,
+                    )
+                    time.sleep(sleep_seconds)
+
+            if search_results is None:
+                return []
 
             results: List[Dict[str, Any]] = []
             for result in search_results:
@@ -1131,49 +1203,68 @@ class RAGProcessor:
         """Reload data for current subject or all subjects"""
         logger.info(f"🔄 Reloading data (clean={clean})")
         start_time = time.time()
-        
-        try:
-            if clean:
-                logger.info("♻️ Resetting collection...")
-                self.qdrant_client.delete_collection(self.collection_name)
-                self._ensure_collection()
-                # Luôn index lại toàn bộ để tránh mất dữ liệu môn khác
-                for subject in self.get_available_subjects():
-                    new_chunks = self._process_subject_folder(subject)
-                    self._add_chunks_to_vectorstore(new_chunks)
 
-            if self.subject_filter:
-                new_chunks = self._process_subject_folder(self.subject_filter)
-                self._add_chunks_to_vectorstore(new_chunks)
-            else:
-                for subject in self.get_available_subjects():
-                    new_chunks = self._process_subject_folder(subject)
-                    self._add_chunks_to_vectorstore(new_chunks)
+        with self._reload_lock:
+            self._reload_in_progress = True
+            try:
+                if clean:
+                    logger.info("♻️ Resetting collection...")
+                    self.qdrant_client.delete_collection(self.collection_name)
+                    self._ensure_collection()
+                    # Luôn index lại toàn bộ để tránh mất dữ liệu môn khác
+                    for subject in self.get_available_subjects():
+                        new_chunks = self._process_subject_folder(subject)
+                        self._add_chunks_to_vectorstore(new_chunks)
 
-            # Keep lexical index in sync with vector store.
-            self._build_bm25_index_from_qdrant()
-            
-            elapsed = time.time() - start_time
-            logger.info(f"✅ Data reload completed in {elapsed:.2f}s")
-            
-        except Exception as e:
-            logger.error(f"Failed to reload data: {e}")
-            raise
+                if self.subject_filter:
+                    new_chunks = self._process_subject_folder(self.subject_filter)
+                    self._add_chunks_to_vectorstore(new_chunks)
+                else:
+                    for subject in self.get_available_subjects():
+                        new_chunks = self._process_subject_folder(subject)
+                        self._add_chunks_to_vectorstore(new_chunks)
+
+                # Keep lexical index in sync with vector store.
+                self._build_bm25_index_from_qdrant()
+
+                elapsed = time.time() - start_time
+                logger.info(f"✅ Data reload completed in {elapsed:.2f}s")
+
+            except Exception as e:
+                logger.error(f"Failed to reload data: {e}")
+                raise
+            finally:
+                self._reload_in_progress = False
 
     def _retrieve_relevant_chunks(self, query: str, k: int = None) -> List[Dict]:
         """Retrieve relevant chunks with hybrid retrieval and reranking."""
+        if self._is_query_blocked_by_reload():
+            logger.warning("⏳ Retrieval skipped because reload is in progress")
+            return []
+
         final_top_n = k if k is not None else RERANK_TOP_N_DEFAULT
         multiplier  = max(1, RERANK_CANDIDATE_MULTIPLIER)
         cap         = max(final_top_n, RERANK_CANDIDATE_CAP)
         candidate_k = max(HYBRID_TOP_K, min(cap, final_top_n * multiplier))
 
         try:
+            retrieval_start = time.perf_counter()
             hybrid_candidates = self.hybrid_retrieve(query, top_k=candidate_k)
+            hybrid_elapsed = time.perf_counter() - retrieval_start
             if not hybrid_candidates:
                 logger.info("🔍 Hybrid retrieval returned 0 candidates")
+                if LOG_RETRIEVAL_TIMING:
+                    logger.info(
+                        "⏱️ Retrieval breakdown: hybrid=%.3fs rerank=0.000s total=%.3fs",
+                        hybrid_elapsed,
+                        hybrid_elapsed,
+                    )
                 return []
 
+            rerank_start = time.perf_counter()
             relevant_chunks = self.rerank(query, hybrid_candidates, top_n=final_top_n)
+            rerank_elapsed = time.perf_counter() - rerank_start
+            total_elapsed = time.perf_counter() - retrieval_start
 
             logger.info(
                 "🔍 Retrieved %s candidates (hybrid=%s) and kept %s after rerank",
@@ -1181,6 +1272,13 @@ class RAGProcessor:
                 candidate_k,
                 len(relevant_chunks),
             )
+            if LOG_RETRIEVAL_TIMING:
+                logger.info(
+                    "⏱️ Retrieval breakdown: hybrid=%.3fs rerank=%.3fs total=%.3fs",
+                    hybrid_elapsed,
+                    rerank_elapsed,
+                    total_elapsed,
+                )
             return relevant_chunks
         except Exception as e:
             logger.error(f"Failed to retrieve chunks: {e}", exc_info=True)
@@ -1238,23 +1336,38 @@ class RAGProcessor:
         k: int = None,
     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Retrieve chunks and return a debug table of per-chunk scores."""
+        if self._is_query_blocked_by_reload():
+            logger.warning("⏳ Debug retrieval skipped because reload is in progress")
+            return [], []
+
         final_top_n = k if k is not None else RERANK_TOP_N_DEFAULT
         multiplier  = max(1, RERANK_CANDIDATE_MULTIPLIER)
         cap         = max(final_top_n, RERANK_CANDIDATE_CAP)
         candidate_k = max(HYBRID_TOP_K, min(cap, final_top_n * multiplier))
 
         try:
+            retrieval_start = time.perf_counter()
             hybrid_candidates = self.hybrid_retrieve(query, top_k=candidate_k)
+            hybrid_elapsed = time.perf_counter() - retrieval_start
             if not hybrid_candidates:
                 logger.info("🔍 Hybrid retrieval returned 0 candidates (debug mode)")
+                if LOG_RETRIEVAL_TIMING:
+                    logger.info(
+                        "⏱️ Retrieval breakdown(debug): hybrid=%.3fs rerank=0.000s total=%.3fs",
+                        hybrid_elapsed,
+                        hybrid_elapsed,
+                    )
                 return [], []
 
             # Score all hybrid candidates with reranker, then slice top-n for context.
+            rerank_start = time.perf_counter()
             reranked_candidates = self.rerank(
                 query,
                 hybrid_candidates,
                 top_n=len(hybrid_candidates),
             )
+            rerank_elapsed = time.perf_counter() - rerank_start
+            total_elapsed = time.perf_counter() - retrieval_start
             relevant_chunks = reranked_candidates[:final_top_n]
 
             selected_chunk_ids = {item.get("id") for item in relevant_chunks}
@@ -1274,6 +1387,13 @@ class RAGProcessor:
                 len(debug_rows),
                 len(relevant_chunks),
             )
+            if LOG_RETRIEVAL_TIMING:
+                logger.info(
+                    "⏱️ Retrieval breakdown(debug): hybrid=%.3fs rerank=%.3fs total=%.3fs",
+                    hybrid_elapsed,
+                    rerank_elapsed,
+                    total_elapsed,
+                )
             return relevant_chunks, debug_rows
         except Exception as e:
             logger.error(f"Failed retrieval debug mode: {e}", exc_info=True)
@@ -1362,6 +1482,13 @@ class RAGProcessor:
         """Get response for query (non-streaming)"""
         logger.info(f"💬 Processing query with {self.llm_model_key}: {query[:100]}...")
         start_time = time.time()
+
+        if self._is_query_blocked_by_reload():
+            busy_msg = "⏳ Hệ thống đang cập nhật dữ liệu, vui lòng thử lại sau ít phút."
+            if use_history:
+                self._add_to_history("user", query)
+                self._add_to_history("assistant", busy_msg)
+            return busy_msg
         
         try:
             relevant_chunks = self._retrieve_relevant_chunks(query)
@@ -1404,6 +1531,23 @@ class RAGProcessor:
         """Get response with retrieval score table for debugging."""
         logger.info(f"💬 Processing debug query with {self.llm_model_key}: {query[:100]}...")
         start_time = time.time()
+
+        if self._is_query_blocked_by_reload():
+            busy_msg = "⏳ Hệ thống đang cập nhật dữ liệu, vui lòng thử lại sau ít phút."
+            if use_history:
+                self._add_to_history("user", query)
+                self._add_to_history("assistant", busy_msg)
+            return {
+                "answer": busy_msg,
+                "debug_scores": [],
+                "retrieval_meta": {
+                    "hybrid_mode": HYBRID_MODE,
+                    "hybrid_top_k": HYBRID_TOP_K,
+                    "rerank_top_n": RERANK_TOP_N_DEFAULT,
+                    "total_candidates": 0,
+                    "reload_in_progress": True,
+                },
+            }
 
         try:
             relevant_chunks, debug_rows = self._retrieve_relevant_chunks_with_debug(query)
@@ -1469,6 +1613,14 @@ class RAGProcessor:
     def get_response_stream(self, query: str, use_history: bool = True) -> Generator[str, None, None]:
         """Get streaming response for query"""
         logger.info(f"💬 Processing streaming query with {self.llm_model_key}: {query[:100]}...")
+
+        if self._is_query_blocked_by_reload():
+            busy_msg = "⏳ Hệ thống đang cập nhật dữ liệu, vui lòng thử lại sau ít phút."
+            if use_history:
+                self._add_to_history("user", query)
+                self._add_to_history("assistant", busy_msg)
+            yield busy_msg
+            return
         
         try:
             relevant_chunks = self._retrieve_relevant_chunks(query)
