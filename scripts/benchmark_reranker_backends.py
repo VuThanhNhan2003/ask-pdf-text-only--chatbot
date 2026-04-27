@@ -65,13 +65,20 @@ def main():
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--pairs", type=int, default=48)
     parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument(
+        "--backend",
+        default="all",
+        choices=["all", "torch", "onnx", "openvino"],
+        help="Run only one backend or all",
+    )
     args = parser.parse_args()
 
     pairs = build_pairs(args.pairs)
     print(f"Model: {args.model}")
     print(f"Pairs: {len(pairs)} | Batch size: {args.batch_size} | Runs: {args.runs}")
 
-    for backend in ("torch", "onnx", "openvino"):
+    backends = ("torch", "onnx", "openvino") if args.backend == "all" else (args.backend,)
+    for backend in backends:
         run_backend(args.model, backend, args.batch_size, pairs, args.runs)
 
 

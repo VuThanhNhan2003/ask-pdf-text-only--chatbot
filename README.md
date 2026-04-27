@@ -89,7 +89,7 @@ Câu hỏi → Embedding (sentence-transformers) → Tìm kiếm Qdrant (top-K)
 | **LLM Proxy** | FastAPI + Uvicorn |
 | **PDF Parsing** | PyMuPDF + pymupdf4llm |
 | **Auth** | bcrypt |
-| **ML Backend** | PyTorch 2.8 (CPU) |
+| **ML Backend** | PyTorch 2.8 (CPU) / OnnxRuntime / Openvino |
 | **DevOps** | Docker Compose |
 
 ---
@@ -168,7 +168,7 @@ QDRANT_COLLECTION=documents
 
 # LLM Proxy
 LLM_PROXY_URL=http://localhost:5000
-LLM_MODEL=qwen2-7b          # hoặc "gemini"
+LLM_MODEL=qwen3-8b          # hoặc "gemini"
 
 # LLM Parameters
 LLM_TEMPERATURE=0.7
@@ -245,7 +245,7 @@ AVAILABLE_MODELS = {
         "type": "api",
         "provider": "google"
     },
-    "qwen2-7b": {        # Qwen 2.5-7B Instruct (vLLM local)
+    "qwen3-8b": {        # Qwen 3-8B Instruct (vLLM local)
         "type": "proxy",
         "provider": "vllm"
     }

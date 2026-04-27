@@ -76,6 +76,36 @@ class ProxyLLM(BaseLLM):
         
         # Verify proxy is reachable
         self._check_proxy()
+
+    def _fallback_to_gemini_text(self, prompt: str) -> str:
+        """Direct Gemini fallback used when proxy is unavailable."""
+        if not config.llm.api_key:
+            raise RuntimeError("GOOGLE_API_KEY is not configured for Gemini fallback")
+
+        gemini = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            temperature=self.temperature,
+            max_output_tokens=self.max_tokens,
+            google_api_key=config.llm.api_key,
+        )
+        response = gemini.invoke(prompt)
+        return response.content if hasattr(response, "content") else str(response)
+
+    def _fallback_to_gemini_stream(self, prompt: str) -> Generator[str, None, None]:
+        """Direct Gemini fallback stream used when proxy is unavailable."""
+        if not config.llm.api_key:
+            raise RuntimeError("GOOGLE_API_KEY is not configured for Gemini fallback")
+
+        gemini = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            temperature=self.temperature,
+            max_output_tokens=self.max_tokens,
+            google_api_key=config.llm.api_key,
+        )
+
+        for chunk in gemini.stream(prompt):
+            if getattr(chunk, "content", None):
+                yield chunk.content
     
     def _check_proxy(self):
         """Check if proxy is reachable"""
@@ -141,13 +171,29 @@ class ProxyLLM(BaseLLM):
                 
         except httpx.TimeoutException:
             logger.error("⏱️ Request timeout")
-            return "[ERROR] Request timeout - server may be overloaded"
+            try:
+                logger.warning("🔄 Falling back to Gemini after proxy timeout")
+                return self._fallback_to_gemini_text(prompt)
+            except Exception as fallback_error:
+                logger.error(f"❌ Gemini fallback failed: {fallback_error}")
+                return "[ERROR] Request timeout - server may be overloaded"
         except httpx.HTTPStatusError as e:
             logger.error(f"❌ HTTP error: {e.response.status_code}")
+            if e.response.status_code == 503:
+                try:
+                    logger.warning("🔄 Falling back to Gemini after proxy 503")
+                    return self._fallback_to_gemini_text(prompt)
+                except Exception as fallback_error:
+                    logger.error(f"❌ Gemini fallback failed: {fallback_error}")
             return f"[ERROR] Server error: {e.response.status_code}"
         except Exception as e:
             logger.error(f"❌ Request failed: {e}")
-            return f"[ERROR] {str(e)}"
+            try:
+                logger.warning("🔄 Falling back to Gemini after request failure")
+                return self._fallback_to_gemini_text(prompt)
+            except Exception as fallback_error:
+                logger.error(f"❌ Gemini fallback failed: {fallback_error}")
+                return f"[ERROR] {str(e)}"
     
     def stream(self, prompt: str) -> Generator[str, None, None]:
         """Streaming generation via proxy"""
@@ -195,6 +241,19 @@ class ProxyLLM(BaseLLM):
                         try:
                             # Parse JSON chunk
                             chunk = json.loads(line)
+
+                            # Proxy may return an explicit error event.
+                            if "error" in chunk:
+                                yield f"\n\n[ERROR] {chunk['error']}"
+                                continue
+
+                            # Defensive fallback: handle non-stream chat.completion payload.
+                            if "choices" in chunk and isinstance(chunk["choices"], list) and chunk["choices"]:
+                                first_choice = chunk["choices"][0]
+                                message = first_choice.get("message", {}) if isinstance(first_choice, dict) else {}
+                                if message and message.get("content"):
+                                    yield message["content"]
+                                    continue
                             
                             # Extract content
                             if "choices" in chunk:
@@ -210,10 +269,33 @@ class ProxyLLM(BaseLLM):
                     
         except httpx.TimeoutException:
             logger.error("⏱️ Streaming timeout")
-            yield "\n\n[ERROR] Request timeout"
+            try:
+                logger.warning("🔄 Falling back to Gemini stream after proxy timeout")
+                for chunk in self._fallback_to_gemini_stream(prompt):
+                    yield chunk
+            except Exception as fallback_error:
+                logger.error(f"❌ Gemini fallback failed: {fallback_error}")
+                yield "\n\n[ERROR] Request timeout"
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ HTTP error: {e.response.status_code}")
+            if e.response.status_code == 503:
+                try:
+                    logger.warning("🔄 Falling back to Gemini stream after proxy 503")
+                    for chunk in self._fallback_to_gemini_stream(prompt):
+                        yield chunk
+                    return
+                except Exception as fallback_error:
+                    logger.error(f"❌ Gemini fallback failed: {fallback_error}")
+            yield f"\n\n[ERROR] Server error: {e.response.status_code}"
         except Exception as e:
             logger.error(f"❌ Streaming error: {e}")
-            yield f"\n\n[ERROR] {str(e)}"
+            try:
+                logger.warning("🔄 Falling back to Gemini stream after request failure")
+                for chunk in self._fallback_to_gemini_stream(prompt):
+                    yield chunk
+            except Exception as fallback_error:
+                logger.error(f"❌ Gemini fallback failed: {fallback_error}")
+                yield f"\n\n[ERROR] {str(e)}"
 
 
 class RemoteGPULLM(BaseLLM):

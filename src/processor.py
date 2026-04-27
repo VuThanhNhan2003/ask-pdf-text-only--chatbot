@@ -2,6 +2,8 @@
 Optimized RAG Processor with logging, better error handling, and performance improvements
 Metadata-enhanced: keywords/topic used for BM25 boosting, rerank boosting, and context enrichment
 """
+
+import langdetect
 import hashlib
 import json
 import logging
@@ -10,7 +12,7 @@ import re
 import shutil
 import threading
 import time
-from typing import Any, Dict, List, Optional, Generator
+from typing import Any, Dict, List, Optional, Generator, Tuple
 from datetime import datetime
 
 import fitz  # PyMuPDF
@@ -103,10 +105,29 @@ RERANK_FALLBACK_BACKENDS = [
     for b in os.getenv("RAG_RERANK_FALLBACK_BACKENDS", "onnx,openvino,torch").split(",")
     if b.strip()
 ]
+RERANKER_CACHE_FOLDER = os.getenv(
+    "RAG_RERANKER_CACHE_FOLDER",
+    os.getenv("SENTENCE_TRANSFORMERS_HOME", config.embedding.cache_folder),
+).strip()
+RERANKER_LOCAL_PATH = os.getenv("RAG_RERANKER_LOCAL_PATH", "").strip()
+RERANKER_PERSIST_OPENVINO = os.getenv("RAG_RERANKER_PERSIST_OPENVINO", "true").lower() == "true"
 RERANK_TOP_N_DEFAULT = int(os.getenv("RAG_RERANK_TOP_N", str(config.retrieval.top_k)))
 RERANK_BATCH_SIZE = int(os.getenv("RAG_RERANK_BATCH_SIZE", "8"))
 RERANK_CANDIDATE_MULTIPLIER = int(os.getenv("RAG_RERANK_CANDIDATE_MULTIPLIER", "1"))
 RERANK_CANDIDATE_CAP = int(os.getenv("RAG_RERANK_CANDIDATE_CAP", "30"))
+
+
+def _sanitize_model_name_for_path(model_name: str) -> str:
+    """Convert model id to filesystem-safe path segment."""
+    sanitized = re.sub(r"[^0-9A-Za-z._-]+", "_", model_name).strip("._-")
+    return sanitized or "reranker"
+
+
+_DEFAULT_OPENVINO_RERANKER_LOCAL_PATH = os.path.join(
+    config.embedding.cache_folder,
+    "openvino_rerankers",
+    _sanitize_model_name_for_path(RERANKER_MODEL_NAME),
+)
 
 # Dense search threshold for Qdrant; set <=0 to disable thresholding.
 DENSE_SCORE_THRESHOLD = float(os.getenv("RAG_DENSE_SCORE_THRESHOLD", str(config.retrieval.score_threshold)))
@@ -238,6 +259,11 @@ def get_embedding_model() -> SentenceTransformer:
 # =====================================================================
 class RAGProcessor:
     """Optimized RAG Processor with streaming support and metadata-enhanced retrieval"""
+
+    # Share reranker instances across processor objects inside one Python process.
+    _shared_rerankers: Dict[str, CrossEncoder] = {}
+    _shared_reranker_predict_locks: Dict[str, threading.RLock] = {}
+    _shared_reranker_lock = threading.RLock()
     
     def __init__(self, subject: Optional[str] = None, llm_model: Optional[str] = None):
         """Initialize the RAG processor for a specific subject."""
@@ -249,6 +275,9 @@ class RAGProcessor:
             self.embedding_model = get_embedding_model()
             self._reranker: Optional[CrossEncoder] = None
             self._reranker_device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._reranker_backend: Optional[str] = None
+            self._reranker_cache_key: Optional[str] = None
+            self._reranker_predict_lock: Optional[threading.RLock] = None
             logger.info(f"🔧 Reranker device: {self._reranker_device}")
             
             # Initialize Qdrant client
@@ -738,6 +767,84 @@ class RAGProcessor:
             return {k: 1.0 for k in scores}
         return {k: (v - min_v) / (max_v - min_v) for k, v in scores.items()}
 
+    @staticmethod
+    def _is_openvino_model_cached(path: str) -> bool:
+        """Check whether a local path already contains OpenVINO IR files."""
+        if not path:
+            return False
+        return os.path.isfile(os.path.join(path, "openvino_model.xml")) or os.path.isfile(
+            os.path.join(path, "openvino", "openvino_model.xml")
+        )
+
+    def _resolve_openvino_local_path(self) -> str:
+        """Resolve preferred local OpenVINO cache path for reranker."""
+        if RERANKER_LOCAL_PATH:
+            return RERANKER_LOCAL_PATH
+        return _DEFAULT_OPENVINO_RERANKER_LOCAL_PATH
+
+    @staticmethod
+    def _make_reranker_cache_key(model_name: str, backend: str, device: str) -> str:
+        return f"{model_name}|{backend}|{device}"
+
+    @staticmethod
+    def _build_backend_kwargs(backend: str, reranker_device: str) -> Dict[str, Any]:
+        """Build backend-specific kwargs for CrossEncoder initialization."""
+        kwargs: Dict[str, Any] = {
+            "max_length": 512,
+            "backend": backend,
+        }
+
+        if RERANKER_CACHE_FOLDER:
+            kwargs["cache_folder"] = RERANKER_CACHE_FOLDER
+
+        if backend == "torch":
+            kwargs["device"] = reranker_device
+            kwargs["model_kwargs"] = {
+                "low_cpu_mem_usage": False,
+                "device_map": None,
+            }
+        else:
+            kwargs["device"] = "cpu"
+
+        return kwargs
+
+    def _get_model_sources(self, backend: str) -> List[Tuple[str, bool]]:
+        """Return candidate model sources in priority order.
+
+        Tuple item = (model_source, is_local_only).
+        """
+        if backend != "openvino":
+            return [(RERANKER_MODEL_NAME, False)]
+
+        local_path = self._resolve_openvino_local_path()
+        if self._is_openvino_model_cached(local_path):
+            return [(local_path, True), (RERANKER_MODEL_NAME, False)]
+        return [(RERANKER_MODEL_NAME, False)]
+
+    def _persist_openvino_model_locally(self, reranker: CrossEncoder):
+        """Persist exported OpenVINO model so next process/session can reuse it."""
+        if not RERANKER_PERSIST_OPENVINO:
+            return
+
+        target_path = self._resolve_openvino_local_path()
+        if self._is_openvino_model_cached(target_path):
+            return
+
+        parent_dir = os.path.dirname(target_path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+
+        temp_path = f"{target_path}.tmp-{os.getpid()}-{int(time.time())}"
+        try:
+            reranker.save_pretrained(temp_path)
+            if os.path.isdir(target_path):
+                shutil.rmtree(target_path, ignore_errors=True)
+            shutil.move(temp_path, target_path)
+            logger.info("💾 Saved OpenVINO reranker cache to %s", target_path)
+        except Exception as save_exc:
+            logger.warning("⚠️ Failed to persist OpenVINO reranker cache: %s", save_exc)
+            shutil.rmtree(temp_path, ignore_errors=True)
+
     def _load_reranker(self) -> CrossEncoder:
         """Lazy-load reranker to keep startup memory low."""
         if self._reranker is None:
@@ -760,42 +867,95 @@ class RAGProcessor:
 
             last_error: Optional[Exception] = None
             for backend in backend_order:
-                try:
-                    kwargs: Dict[str, Any] = {
-                        "max_length": 512,
-                        "backend": backend,
-                    }
+                model_sources = self._get_model_sources(backend)
+                for model_source, local_only in model_sources:
+                    device = self._reranker_device if backend == "torch" else "cpu"
+                    cache_key = self._make_reranker_cache_key(RERANKER_MODEL_NAME, backend, device)
 
-                    if backend == "torch":
-                        kwargs["device"] = self._reranker_device
-                        kwargs["model_kwargs"] = {
-                            "low_cpu_mem_usage": False,
-                            "device_map": None,
-                        }
-                    else:
-                        kwargs["device"] = "cpu"
+                    with RAGProcessor._shared_reranker_lock:
+                        cached = RAGProcessor._shared_rerankers.get(cache_key)
+                        if cached is not None:
+                            self._reranker = cached
+                            self._reranker_backend = backend
+                            self._reranker_cache_key = cache_key
+                            self._reranker_predict_lock = RAGProcessor._shared_reranker_predict_locks.setdefault(
+                                cache_key,
+                                threading.RLock(),
+                            )
+                            logger.info("♻️ Reusing reranker from shared cache with backend=%s", backend)
+                            return self._reranker
 
-                    self._reranker = CrossEncoder(RERANKER_MODEL_NAME, **kwargs)
-                    logger.info("✅ Reranker loaded with backend=%s", backend)
-                    break
-                except Exception as rerank_exc:
-                    last_error = rerank_exc
-                    logger.warning(
-                        "⚠️ Failed to load reranker with backend=%s: %s",
-                        backend,
-                        rerank_exc,
-                    )
+                        try:
+                            kwargs = self._build_backend_kwargs(backend, self._reranker_device)
+                            if local_only:
+                                kwargs["local_files_only"] = True
+
+                            self._reranker = CrossEncoder(model_source, **kwargs)
+                            self._reranker_backend = backend
+                            self._reranker_cache_key = cache_key
+                            self._reranker_predict_lock = RAGProcessor._shared_reranker_predict_locks.setdefault(
+                                cache_key,
+                                threading.RLock(),
+                            )
+
+                            RAGProcessor._shared_rerankers[cache_key] = self._reranker
+
+                            if backend == "openvino" and not local_only:
+                                self._persist_openvino_model_locally(self._reranker)
+
+                            source_label = "local" if local_only else "hub"
+                            logger.info("✅ Reranker loaded with backend=%s source=%s", backend, source_label)
+                            return self._reranker
+                        except Exception as rerank_exc:
+                            last_error = rerank_exc
+                            logger.warning(
+                                "⚠️ Failed to load reranker with backend=%s source=%s: %s",
+                                backend,
+                                model_source,
+                                rerank_exc,
+                            )
+                            if backend == "openvino" and local_only and os.path.isdir(model_source):
+                                logger.warning("⚠️ Local OpenVINO reranker cache seems invalid, removing: %s", model_source)
+                                shutil.rmtree(model_source, ignore_errors=True)
+                            self._reranker = None
+                            self._reranker_backend = None
+                            self._reranker_cache_key = None
+                            self._reranker_predict_lock = None
 
             if self._reranker is None:
                 logger.warning(
                     "⚠️ All requested reranker backends failed. Falling back to lightweight reranker on CPU."
                 )
                 try:
-                    self._reranker = CrossEncoder(
-                        "cross-encoder/ms-marco-MiniLM-L-6-v2",
-                        device="cpu",
-                        max_length=512,
-                    )
+                    fallback_model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+                    fallback_backend = "torch"
+                    fallback_key = self._make_reranker_cache_key(fallback_model, fallback_backend, "cpu")
+
+                    with RAGProcessor._shared_reranker_lock:
+                        cached_fallback = RAGProcessor._shared_rerankers.get(fallback_key)
+                        if cached_fallback is not None:
+                            self._reranker = cached_fallback
+                            self._reranker_backend = fallback_backend
+                            self._reranker_cache_key = fallback_key
+                            self._reranker_predict_lock = RAGProcessor._shared_reranker_predict_locks.setdefault(
+                                fallback_key,
+                                threading.RLock(),
+                            )
+                        else:
+                            self._reranker = CrossEncoder(
+                                fallback_model,
+                                device="cpu",
+                                max_length=512,
+                                cache_folder=RERANKER_CACHE_FOLDER or None,
+                            )
+                            self._reranker_backend = fallback_backend
+                            self._reranker_cache_key = fallback_key
+                            self._reranker_predict_lock = RAGProcessor._shared_reranker_predict_locks.setdefault(
+                                fallback_key,
+                                threading.RLock(),
+                            )
+                            RAGProcessor._shared_rerankers[fallback_key] = self._reranker
+
                     logger.info("✅ Fallback reranker loaded with backend=torch")
                 except Exception:
                     if last_error is not None:
@@ -1193,11 +1353,20 @@ class RAGProcessor:
             reranker = self._load_reranker()
             pairs    = [(query, item.get("text", "")) for item in candidates]
 
-            scores = reranker.predict(
-                pairs,
-                batch_size=RERANK_BATCH_SIZE,
-                show_progress_bar=False,
-            )
+            if self._reranker_backend == "openvino" and self._reranker_predict_lock is not None:
+                # OpenVINO infer request is not thread-safe across concurrent calls on one model object.
+                with self._reranker_predict_lock:
+                    scores = reranker.predict(
+                        pairs,
+                        batch_size=RERANK_BATCH_SIZE,
+                        show_progress_bar=False,
+                    )
+            else:
+                scores = reranker.predict(
+                    pairs,
+                    batch_size=RERANK_BATCH_SIZE,
+                    show_progress_bar=False,
+                )
 
             # CrossEncoder may return np.ndarray with shape (n,) or (n,1)
             scores = np.asarray(scores).reshape(-1)
@@ -1465,32 +1634,37 @@ class RAGProcessor:
         """Set conversation history from external source (e.g., database)"""
         self.conversation_history = messages[-self.max_history_messages * 2:] if messages else []
         logger.info(f"📝 Set conversation history: {len(self.conversation_history)} messages")
+
+    def _detect_language(self, text: str) -> str:
+        try:
+            lang = langdetect.detect(text)
+            return "English" if lang == "en" else "Vietnamese"
+        except:
+            return "Vietnamese"
     
     def _build_prompt(self, context: str, question: str, use_history: bool = True) -> str:
-        """
-        Build prompt for LLM with optional conversation history
         
-        Args:
-            context: Retrieved context from documents
-            question: User's question
-            use_history: Whether to include conversation history
-        """
-        
-        # Build history section if needed
+        target_lang = self._detect_language(question)
+        lang_directive = f"IMPORTANT: You MUST respond in {target_lang}, regardless of the language used in the context or instructions below."
+
         history_section = ""
         if use_history and self.conversation_history:
             history_parts = []
             for msg in self.conversation_history:
                 role = "Người dùng" if msg["role"] == "user" else "Trợ lý AI"
                 history_parts.append(f"{role}: {msg['content']}")
-            
             history_text = "\n".join(history_parts)
             history_section = f"""Lịch sử hội thoại trước đó:
         {history_text}
 
     """
+
+        question_label      = " hiện tại của người dùng" if use_history else " của người dùng"
+        history_instruction = "2. Tham khảo lịch sử hội thoại nếu câu hỏi hiện tại liên quan đến câu hỏi trước.\n" if use_history else ""
+
+        prompt_template = """{lang_directive}
         
-        prompt_template = """Bạn là một trợ lý AI được thiết kế để cung cấp các câu trả lời phù hợp và sâu sắc dựa trên ngữ cảnh từ nhiều tài liệu khác nhau.
+    Bạn là một trợ lý AI được thiết kế để cung cấp các câu trả lời phù hợp và sâu sắc dựa trên ngữ cảnh từ nhiều tài liệu khác nhau.
 
     {history_section}Hãy sử dụng ngữ cảnh sau để trả lời câu hỏi của người dùng:
 
@@ -1499,24 +1673,21 @@ class RAGProcessor:
     Câu hỏi{question_label}: {question}
 
     Câu trả lời của bạn cần:
-    1. Rõ ràng, ngắn gọn và dựa trực tiếp vào ngữ cảnh đã cung cấp.
-    {history_instruction}2. Bao gồm các chi tiết cụ thể từ tài liệu khi phù hợp.
-    3. Nếu bạn không biết câu trả lời, hãy nói rõ.
+    {history_instruction}1. Chỉ sử dụng thông tin trong phần Ngữ cảnh để trả lời. Nếu ngữ cảnh không đủ thông tin, hãy nói rõ tài liệu không đề cập đến vấn đề này — tuyệt đối không suy đoán hoặc dùng kiến thức bên ngoài tài liệu.
+    2. Rõ ràng, ngắn gọn và dựa trực tiếp vào ngữ cảnh đã cung cấp.
+    3. Bao gồm các chi tiết cụ thể từ tài liệu khi phù hợp.
     4. Nếu có nhiều tài liệu liên quan, hãy tổng hợp thông tin một cách mạch lạc.
     5. KHÔNG nêu nguồn trong câu trả lời - nguồn sẽ được thêm tự động.
 
-    Câu trả lời của bạn:
     """
-        
-        question_label       = " hiện tại của người dùng" if use_history else " của người dùng"
-        history_instruction  = "2. Tham khảo lịch sử hội thoại nếu câu hỏi hiện tại liên quan đến câu hỏi trước.\n" if use_history else ""
-        
+
         return prompt_template.format(
+            lang_directive=lang_directive,
             history_section=history_section,
             context=context,
             question=question,
             question_label=question_label,
-            history_instruction=history_instruction
+            history_instruction=history_instruction,
         )
 
     def get_response(self, query: str, use_history: bool = True) -> str:

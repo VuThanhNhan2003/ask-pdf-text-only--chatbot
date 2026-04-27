@@ -7,6 +7,8 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=300 \
+    PIP_RETRIES=8 \
     PYTHONPATH=/app \
     HF_HOME=/hf_cache \
     TRANSFORMERS_CACHE=/hf_cache
@@ -20,7 +22,8 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir --retries 8 --timeout 300 -r requirements.txt
 
 # Tạo sẵn các thư mục
 RUN mkdir -p /app/src /app/data /app/models /app/logs \

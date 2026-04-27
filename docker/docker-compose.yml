@@ -40,6 +40,8 @@ services:
     container_name: chatbot_llm_proxy
     ports:
       - "5000:5000"
+    env_file:
+      - ../.env
     environment:
       - PYTHONUNBUFFERED=1
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}          # ← thêm để fallback hoạt động

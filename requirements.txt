@@ -20,7 +20,7 @@ rank-bm25==0.2.2
 onnxruntime==1.22.1
 optimum==2.1.0
 optimum-intel==1.27.0
-openvino==2025.0.0
+openvino==2025.4.0
 
 # ML/AI Framework
 torch==2.8.0+cpu
@@ -56,6 +56,8 @@ extra-streamlit-components==0.1.80
 
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
+
+langdetect
 
 
 

@@ -134,8 +134,8 @@ class VLLMManager:
 
 
 # ==================== GEMINI FALLBACK ====================
-async def fallback_to_gemini(request: ChatCompletionRequest):
-    """Fallback to Gemini API when vLLM unavailable"""
+async def fallback_to_gemini(request: ChatCompletionRequest, stream: bool = False):
+    """Fallback to Gemini API when vLLM unavailable."""
     
     if not GEMINI_API_KEY:
         raise HTTPException(
@@ -161,17 +161,18 @@ async def fallback_to_gemini(request: ChatCompletionRequest):
         ])
         
         response = llm.invoke(prompt)
-        
-        return {
+        content = response.content if hasattr(response, "content") else str(response)
+
+        result = {
             "id": f"gemini-{int(time.time())}",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": "gemini-2.0-flash",
+            "model": "gemini-2.5-flash",
             "choices": [{
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": response.content
+                    "content": content
                 },
                 "finish_reason": "stop"
             }],
@@ -181,6 +182,28 @@ async def fallback_to_gemini(request: ChatCompletionRequest):
                 "total_tokens": 0
             }
         }
+
+        if not stream:
+            return result
+
+        async def gemini_sse():
+            # Return a minimal OpenAI-compatible SSE stream for stream clients.
+            chunk = {
+                "id": result["id"],
+                "object": "chat.completion.chunk",
+                "created": result["created"],
+                "model": result["model"],
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": content},
+                    "finish_reason": "stop"
+                }]
+            }
+            import json
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(gemini_sse(), media_type="text/event-stream")
         
     except Exception as e:
         logger.error(f"Gemini fallback failed: {e}")
@@ -262,7 +285,7 @@ async def chat_completions(request: ChatCompletionRequest):
             await asyncio.sleep(1)
 
     logger.warning(f"🔄 Falling back to Gemini after {time.time()-t0:.2f}s")
-    return await fallback_to_gemini(request)
+    return await fallback_to_gemini(request, stream=request.stream)
 
 
 @app.get("/servers")
