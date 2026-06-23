@@ -1,0 +1,411 @@
+{
+  "queries": 100,
+  "avg_ms": 5487.514970675111,
+  "p50_ms": 5307.221241295338,
+  "p95_ms": 7173.197835683823,
+  "subject": "Môn Triết học Mác-Lênin",
+  "llm_model": "qwen3-8b",
+  "use_history": false,
+  "results": [
+    {
+      "query": "Triết học Mác-Lênin thực hiện những chức năng cơ bản nào?",
+      "latency_ms": 5131.353810429573
+    },
+    {
+      "query": "Thế giới quan là gì và định hướng cho con người như thế nào?",
+      "latency_ms": 9741.840533912182
+    },
+    {
+      "query": "Phương pháp luận là gì? Nó khác với phương pháp thông thường như thế nào?",
+      "latency_ms": 7070.829518139362
+    },
+    {
+      "query": "Việc lựa chọn và vận dụng phương pháp có ảnh hưởng như thế nào đến kết quả hoạt động của con người?",
+      "latency_ms": 5885.497204959393
+    },
+    {
+      "query": "Thế giới quan và phương pháp luận trong triết học Mác-Lênin có mối quan hệ thống nhất hữu cơ như thế nào?",
+      "latency_ms": 9306.116349995136
+    },
+    {
+      "query": "Vai trò của triết học Mác-Lênin đối với sự nghiệp đổi mới ở Việt Nam hiện nay là gì?",
+      "latency_ms": 7827.032133936882
+    },
+    {
+      "query": "Khoa học là gì? Kỹ thuật là gì? Theo tài liệu, hai khái niệm này khác nhau như thế nào?",
+      "latency_ms": 7275.993227958679
+    },
+    {
+      "query": "Trước thế kỷ XVIII-XIX, sự gắn kết giữa khoa học, kỹ thuật, công nghệ và sản xuất có đặc điểm gì?",
+      "latency_ms": 5402.025781571865
+    },
+    {
+      "query": "Bản chất của cuộc cách mạng khoa học và công nghệ là gì?",
+      "latency_ms": 5095.3536704182625
+    },
+    {
+      "query": "Các quốc gia khi hội nhập xu thế toàn cầu hóa sẽ có những tác động tích cực nào?",
+      "latency_ms": 7930.185832083225
+    },
+    {
+      "query": "Mâu thuẫn chủ yếu của thời đại trong xu thế hiện đại là mâu thuẫn giữa những lực lượng nào?",
+      "latency_ms": 4916.703537106514
+    },
+    {
+      "query": "Triết học Mác-Lênin sẽ tiếp tục định hướng cho chúng ta điều gì trong điều kiện toàn cầu hóa và cách mạng KH&CN?",
+      "latency_ms": 7173.197835683823
+    },
+    {
+      "query": "Triết học Mác-Lênin được định nghĩa như thế nào để phân tích xu hướng phát triển xã hội trong điều kiện cách mạng khoa học và công nghệ?",
+      "latency_ms": 6749.164164066315
+    },
+    {
+      "query": "Khái niệm 'biện chứng' được hiểu theo những nghĩa nào trong lịch sử triết học? Từ thế kỷ XIX khái niệm này chỉ điều gì?",
+      "latency_ms": 5676.69939994812
+    },
+    {
+      "query": "Trong hiện thực, biện chứng thể hiện dưới những hình thức nào?",
+      "latency_ms": 5566.284723579884
+    },
+    {
+      "query": "Biện chứng khách quan và biện chứng chủ quan được định nghĩa như thế nào?",
+      "latency_ms": 5061.647400259972
+    },
+    {
+      "query": "Biện chứng khách quan quy định nội dung và sự vận động của biện chứng chủ quan như thế nào?",
+      "latency_ms": 5209.215380251408
+    },
+    {
+      "query": "Tại sao biện chứng chủ quan có tính độc lập tương đối so với biện chứng khách quan?",
+      "latency_ms": 4719.3561643362045
+    },
+    {
+      "query": "Nguyên nhân bên trong và nguyên nhân bên ngoài khác nhau như thế nào?",
+      "latency_ms": 5011.378288269043
+    },
+    {
+      "query": "Phân biệt 'nguyên nhân chủ yếu' và 'nguyên nhân thứ yếu'. Cho ví dụ.",
+      "latency_ms": 5065.699741244316
+    },
+    {
+      "query": "Phân biệt 'nguyên nhân khách quan' và 'nguyên nhân chủ quan'.",
+      "latency_ms": 5591.655977070332
+    },
+    {
+      "query": "Kết quả trong triết học Mác-Lênin được định nghĩa như thế nào?",
+      "latency_ms": 5817.338176071644
+    },
+    {
+      "query": "Tính khách quan của mối quan hệ giữa nguyên nhân và kết quả có nghĩa là gì?",
+      "latency_ms": 4824.951745569706
+    },
+    {
+      "query": "Nguyên nhân và kết quả có thể chuyển hóa cho nhau không? Nêu ví dụ minh họa từ tài liệu.",
+      "latency_ms": 6670.3556552529335
+    },
+    {
+      "query": "Sức khỏe của con người bị ảnh hưởng bởi những nhân tố nào theo tài liệu?",
+      "latency_ms": 5567.596293985844
+    },
+    {
+      "query": "Ý nghĩa phương pháp luận thứ nhất của việc nghiên cứu cặp phạm trù nguyên nhân và kết quả là gì?",
+      "latency_ms": 5345.055274665356
+    },
+    {
+      "query": "Phạm trù 'tất nhiên' và 'ngẫu nhiên' trong triết học Mác-Lênin được định nghĩa như thế nào?",
+      "latency_ms": 5705.768004059792
+    },
+    {
+      "query": "Cái tất nhiên và cái ngẫu nhiên thống nhất với nhau như thế nào? Nêu ví dụ cụ thể.",
+      "latency_ms": 5245.315693318844
+    },
+    {
+      "query": "Tất nhiên và ngẫu nhiên có vai trò như thế nào đối với sự vận động và phát triển của sự vật?",
+      "latency_ms": 5086.887918412685
+    },
+    {
+      "query": "Vì tất nhiên là cái nhất định xảy ra, trong nhận thức và thực tiễn con người phải làm gì?",
+      "latency_ms": 5414.270311594009
+    },
+    {
+      "query": "Tất nhiên và ngẫu nhiên tồn tại trong sự thống nhất hữu cơ với nhau nghĩa là gì?",
+      "latency_ms": 5003.455847501755
+    },
+    {
+      "query": "Tất nhiên và ngẫu nhiên có thể chuyển hóa cho nhau trong những mối liên hệ nhất định – điều này có nghĩa là gì?",
+      "latency_ms": 5220.422267913818
+    },
+    {
+      "query": "Nội dung và hình thức trong triết học Mác-Lênin được định nghĩa như thế nào?",
+      "latency_ms": 5404.386803507805
+    },
+    {
+      "query": "Phân biệt 'hình thức bên trong' và 'hình thức bên ngoài' của sự vật. Cho ví dụ từ tác phẩm văn học.",
+      "latency_ms": 5469.3315997719765
+    },
+    {
+      "query": "Nội dung quyết định hình thức được hiểu như thế nào trong triết học Mác-Lênin?",
+      "latency_ms": 5384.707674384117
+    },
+    {
+      "query": "Trong nhận thức và thực tiễn, vì sao không nên tách rời nội dung và hình thức và không nên tuyệt đối hóa một yếu tố nào?",
+      "latency_ms": 5506.575278937817
+    },
+    {
+      "query": "Hình thức có tác động ngược lại nội dung như thế nào?",
+      "latency_ms": 4807.8019469976425
+    },
+    {
+      "query": "Bản chất và hiện tượng được định nghĩa như thế nào trong triết học Mác-Lênin?",
+      "latency_ms": 5554.178915917873
+    },
+    {
+      "query": "Bản chất của ý thức là gì? Tại sao ý thức được gọi là sự phản ánh năng động, sáng tạo?",
+      "latency_ms": 5411.191329360008
+    },
+    {
+      "query": "Sự thống nhất giữa bản chất và hiện tượng biểu hiện như thế nào?",
+      "latency_ms": 5226.751856505871
+    },
+    {
+      "query": "Bản chất phản ánh cái gì và hiện tượng phản ánh cái gì trong mối quan hệ mâu thuẫn giữa chúng?",
+      "latency_ms": 5212.875999510288
+    },
+    {
+      "query": "Tại sao truy tìm bản chất phải nhận thức rất nhiều hiện tượng và từ nhiều góc độ khác nhau?",
+      "latency_ms": 5187.237001955509
+    },
+    {
+      "query": "Biểu hiện nào của sự phản ánh năng động, sáng tạo hiện thực khách quan vào bộ não người?",
+      "latency_ms": 5245.502009987831
+    },
+    {
+      "query": "Khả năng và hiện thực trong triết học Mác-Lênin được định nghĩa như thế nào?",
+      "latency_ms": 5466.950207948685
+    },
+    {
+      "query": "Hiện thực khách quan và hiện thực chủ quan dùng để chỉ điều gì?",
+      "latency_ms": 5177.587054669857
+    },
+    {
+      "query": "Sự thống nhất giữa khả năng và hiện thực biểu hiện như thế nào?",
+      "latency_ms": 4955.520965158939
+    },
+    {
+      "query": "Khả năng gần là gì? Khả năng xa là gì?",
+      "latency_ms": 5198.344029486179
+    },
+    {
+      "query": "Tại sao trong xã hội, khả năng không tự biến thành hiện thực mà cần nhân tố chủ quan?",
+      "latency_ms": 5085.765160620213
+    },
+    {
+      "query": "Chủ nghĩa Mác dựa vào 'hiện thực' hay 'khả năng' để vạch ra đường lối chính trị? Tại sao?",
+      "latency_ms": 5593.528591096401
+    },
+    {
+      "query": "Vì sao trong hoạt động nhận thức và thực tiễn phải tính đến các khả năng và phân loại chúng?",
+      "latency_ms": 5396.2356224656105
+    },
+    {
+      "query": "Lý luận nhận thức là gì? Nó nghiên cứu những vấn đề cốt lõi nào?",
+      "latency_ms": 4978.96171361208
+    },
+    {
+      "query": "Chủ nghĩa duy tâm chủ quan quan niệm về nhận thức như thế nào? Tại sao bị phê phán?",
+      "latency_ms": 5402.868673205376
+    },
+    {
+      "query": "Chủ nghĩa duy tâm khách quan quan niệm hoạt động nhận thức là gì? Platon giải thích nhận thức như thế nào?",
+      "latency_ms": 5549.29418861866
+    },
+    {
+      "query": "Phái hoài nghi và phái bất khả tri quan niệm về nhận thức như thế nào? Điểm giống và khác nhau là gì?",
+      "latency_ms": 5585.098996758461
+    },
+    {
+      "query": "Chủ nghĩa duy vật trước Mác quan niệm về nhận thức như thế nào và hạn chế ở điểm nào?",
+      "latency_ms": 5453.0343785882
+    },
+    {
+      "query": "Nêu bốn nguyên tắc xây dựng lý luận nhận thức của chủ nghĩa duy vật biện chứng.",
+      "latency_ms": 5263.95858079195
+    },
+    {
+      "query": "Vai trò của thực tiễn đối với lý luận nhận thức được khẳng định như thế nào trong tài liệu?",
+      "latency_ms": 4911.018498241901
+    },
+    {
+      "query": "Chân lý là gì? Quá trình đạt đến chân lý diễn ra như thế nào?",
+      "latency_ms": 5187.036417424679
+    },
+    {
+      "query": "Chân lý có những tính chất cơ bản nào? Liệt kê đầy đủ.",
+      "latency_ms": 5260.502643883228
+    },
+    {
+      "query": "Tính khách quan của chân lý là gì? Tại sao chân lý không phụ thuộc vào ý thức chủ quan?",
+      "latency_ms": 5303.719036281109
+    },
+    {
+      "query": "Tính cụ thể của chân lý có nghĩa là gì?",
+      "latency_ms": 5306.216694414616
+    },
+    {
+      "query": "Chân lý tương đối và chân lý tuyệt đối được định nghĩa như thế nào?",
+      "latency_ms": 5225.231781601906
+    },
+    {
+      "query": "Hình thức cộng đồng người là gì? Trình tự hình thành các hình thức cộng đồng người trong lịch sử là gì?",
+      "latency_ms": 5006.433643400669
+    },
+    {
+      "query": "Tổ chức xã hội của thị tộc được điều hành như thế nào? Ai đứng đầu thị tộc?",
+      "latency_ms": 4749.393530189991
+    },
+    {
+      "query": "Bộ lạc khác thị tộc như thế nào? Tổ chức xã hội của bộ lạc có gì đặc trưng?",
+      "latency_ms": 4869.069799780846
+    },
+    {
+      "query": "Bộ tộc là gì? Nó hình thành trong điều kiện kinh tế – xã hội như thế nào?",
+      "latency_ms": 4893.8087075948715
+    },
+    {
+      "query": "Sự phát triển từ thị tộc đến bộ lạc, bộ tộc rồi đến dân tộc phản ánh quy luật gì?",
+      "latency_ms": 5545.091077685356
+    },
+    {
+      "query": "Khái niệm 'dân tộc' được hiểu theo mấy nghĩa? Theo nghĩa rộng và nghĩa hẹp, dân tộc dùng để chỉ điều gì?",
+      "latency_ms": 5307.221241295338
+    },
+    {
+      "query": "Đặc trưng thứ nhất của quốc gia – dân tộc là gì? Lãnh thổ có vai trò như thế nào đối với dân tộc?",
+      "latency_ms": 5482.83613473177
+    },
+    {
+      "query": "Đặc trưng thứ hai của dân tộc là thống nhất về ngôn ngữ được thể hiện như thế nào?",
+      "latency_ms": 5343.472324311733
+    },
+    {
+      "query": "Kết quả tất nhiên của việc giai cấp tư sản tích tụ sản xuất vào tay ít người là gì?",
+      "latency_ms": 5523.918770253658
+    },
+    {
+      "query": "Giai cấp được định nghĩa như thế nào? Nêu các tiêu chí phân biệt giai cấp.",
+      "latency_ms": 5367.72046983242
+    },
+    {
+      "query": "Giai cấp và dân tộc khác nhau như thế nào về thời gian tồn tại và phạm vi?",
+      "latency_ms": 5218.187160789967
+    },
+    {
+      "query": "Nhân tố giai cấp giữ vai trò gì đối với kết quả lãnh đạo các phong trào giải phóng dân tộc?",
+      "latency_ms": 5220.719039440155
+    },
+    {
+      "query": "Sự tồn tại của nhân loại có vai trò gì đối với sự tồn tại và phát triển của dân tộc và giai cấp?",
+      "latency_ms": 5346.975974738598
+    },
+    {
+      "query": "Trong tài liệu về mối quan hệ giai cấp – dân tộc, dân tộc được định nghĩa là cộng đồng người ổn định được hình thành trong lịch sử trên cơ sở những yếu tố nào? Nêu đủ: lãnh thổ, ngôn ngữ, kinh tế, văn hóa – tâm lý – tính cách, nhà nước và pháp luật.",
+      "latency_ms": 6084.4546854496
+    },
+    {
+      "query": "Tính chất của cách mạng xã hội là gì? Cơ sở để xác định tính chất đó là gì?",
+      "latency_ms": 4907.383248209953
+    },
+    {
+      "query": "Phân biệt 'lực lượng cách mạng', 'động lực cách mạng', 'đối tượng cách mạng' và 'giai cấp lãnh đạo cách mạng'.",
+      "latency_ms": 5356.102801859379
+    },
+    {
+      "query": "Cách mạng Tháng Tám 1945 có tính chất gì và kết quả của cuộc cách mạng đó là gì?",
+      "latency_ms": 5186.3254606723785
+    },
+    {
+      "query": "Tình thế cách mạng là gì và nó khác điều kiện khách quan như thế nào?",
+      "latency_ms": 5401.920326054096
+    },
+    {
+      "query": "Nhân tố chủ quan trong cách mạng xã hội là gì?",
+      "latency_ms": 4830.702051520348
+    },
+    {
+      "query": "Thời cơ cách mạng là gì?",
+      "latency_ms": 4781.749464571476
+    },
+    {
+      "query": "Tại sao trong thời đại ngày nay khó có những cuộc cách mạng như Cách mạng Tháng Mười Nga 1917?",
+      "latency_ms": 5388.651609420776
+    },
+    {
+      "query": "Xã hội theo nghĩa rộng và nghĩa hẹp được định nghĩa như thế nào trong triết học Mác-Lênin?",
+      "latency_ms": 5436.7071613669395
+    },
+    {
+      "query": "Trong mối quan hệ giữa cá nhân và xã hội, xã hội quyết định cá nhân như thế nào?",
+      "latency_ms": 5312.9740208387375
+    },
+    {
+      "query": "Ý nghĩa phương pháp luận của việc nghiên cứu mối quan hệ giữa cá nhân và xã hội là gì?",
+      "latency_ms": 5253.984086215496
+    },
+    {
+      "query": "Quần chúng nhân dân là gì? Những lực lượng nào cấu thành quần chúng nhân dân?",
+      "latency_ms": 4698.140673339367
+    },
+    {
+      "query": "Nêu ba vai trò của quần chúng nhân dân trong lịch sử theo tài liệu.",
+      "latency_ms": 4897.035196423531
+    },
+    {
+      "query": "Vĩ nhân là gì? Lãnh tụ là gì? Điểm khác biệt giữa vĩ nhân và lãnh tụ là gì?",
+      "latency_ms": 5255.837000906467
+    },
+    {
+      "query": "Mối quan hệ biện chứng giữa quần chúng nhân dân và lãnh tụ được thể hiện như thế nào?",
+      "latency_ms": 5010.431483387947
+    },
+    {
+      "query": "Tuyệt đối hóa vai trò của lãnh tụ dẫn đến hậu quả gì? Tuyệt đối hóa vai trò quần chúng dẫn đến điều gì?",
+      "latency_ms": 5337.729625403881
+    },
+    {
+      "query": "Tại sao không có lãnh tụ cho mọi thời đại mà chỉ có lãnh tụ gắn với một thời đại nhất định?",
+      "latency_ms": 5179.901733994484
+    },
+    {
+      "query": "Trong xã hội có giai cấp, sự thống nhất và mâu thuẫn trong quan hệ giữa cá nhân và xã hội thể hiện như thế nào?",
+      "latency_ms": 5855.3232699632645
+    },
+    {
+      "query": "Theo quan điểm của chủ nghĩa Mác-Lênin, con người là gì? Con người vừa là sản phẩm vừa là chủ thể của lịch sử được hiểu như thế nào?",
+      "latency_ms": 5718.262001872063
+    },
+    {
+      "query": "Hồ Chí Minh tiếp cận khái niệm 'con người' theo những nghĩa nào? Nêu nội dung cụ thể.",
+      "latency_ms": 5137.563817203045
+    },
+    {
+      "query": "Theo Hồ Chí Minh, các bước giải phóng con người phải theo trình tự nào và tại sao?",
+      "latency_ms": 4968.532510101795
+    },
+    {
+      "query": "Con người là mục tiêu của cách mạng được hiểu như thế nào trong sự nghiệp cách mạng ở Việt Nam?",
+      "latency_ms": 5395.181857049465
+    },
+    {
+      "query": "Phát huy vai trò nhân tố con người là gì? Đây là quá trình như thế nào?",
+      "latency_ms": 4838.093608617783
+    },
+    {
+      "query": "Tài liệu nêu những yêu cầu nào về đạo đức và lối sống đối với con người Việt Nam hiện nay?",
+      "latency_ms": 5139.479719102383
+    },
+    {
+      "query": "Mối quan hệ giữa triết học Mác-Lênin với các loại tri thức khác trong nhận thức và thực tiễn là gì?",
+      "latency_ms": 5484.120264649391
+    }
+  ]
+}

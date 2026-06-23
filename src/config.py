@@ -1,6 +1,6 @@
 """
 Configuration management for RAG Chatbot
-Updated with Proxy LLM support
+Updated with Proxy LLM support + Groq API support
 """
 import os
 from dataclasses import dataclass
@@ -60,60 +60,81 @@ class ChunkingConfig:
 class LLMConfig:
     """
     LLM configuration
-    
+
     Supports:
-    - API models (Gemini) - direct API calls
-    - Proxy models (vLLM) - via lightweight proxy with retry & fallback
+    - API models (Gemini)     – direct API calls
+    - Groq models             – OpenAI-compatible API via Groq
+    - Proxy models (vLLM)     – via lightweight proxy with retry & fallback
     """
-    
-    # Available models
+
+    # ------------------------------------------------------------------ #
+    # Available models registry
+    # ------------------------------------------------------------------ #
     AVAILABLE_MODELS = {
+        # ── Google Gemini ──────────────────────────────────────────────
         "gemini": {
             "name": "gemini-2.5-flash",
             "type": "api",
             "provider": "google",
-            "description": "Google Gemini (API)"
+            "description": "Google Gemini 2.5 Flash (API)",
         },
+        # ── Groq ───────────────────────────────────────────────────────
+        "groq-qwen3-32b": {
+            "name": "qwen/qwen3-32b",          # model ID on Groq
+            "type": "groq",
+            "provider": "groq",
+            "description": "Groq Qwen3 32B",
+        },
+        # ── Local vLLM via proxy ────────────────────────────────────────
         "qwen3-8b": {
             "name": "Qwen/Qwen3-8B-AWQ",
             "type": "proxy",
             "provider": "vllm",
-            "description": "Qwen 8B via Proxy (vLLM + Gemini fallback)"
+            "description": "Qwen 8B via Proxy (vLLM + Gemini fallback)",
         },
     }
-    
+
     def __post_init__(self):
         """Initialize instance variables"""
-        # Current model
+        # ── Current model ──────────────────────────────────────────────
         self.current_model = os.getenv("LLM_MODEL", "gemini")
-        
-        # Validate model exists
+
         if self.current_model not in self.AVAILABLE_MODELS:
-            print(f"⚠️ Warning: LLM_MODEL '{self.current_model}' not found")
-            print(f"Available: {list(self.AVAILABLE_MODELS.keys())}")
-            print("Falling back to 'gemini'")
+            print(f"⚠️  Warning: LLM_MODEL '{self.current_model}' not found")
+            print(f"   Available: {list(self.AVAILABLE_MODELS.keys())}")
+            print("   Falling back to 'gemini'")
             self.current_model = "gemini"
-        
-        # Model-specific configs
-        self.model_name = self.AVAILABLE_MODELS[self.current_model]["name"]
-        self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+
+        # ── Generic model params ───────────────────────────────────────
+        self.model_name       = self.AVAILABLE_MODELS[self.current_model]["name"]
+        self.temperature      = float(os.getenv("LLM_TEMPERATURE", "0.7"))
         self.max_output_tokens = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "2048"))
-        
-        # API keys
-        self.api_key = os.getenv("GOOGLE_API_KEY", "")
-        
-        # Proxy URL (for proxy models)
+
+        # ── API keys ───────────────────────────────────────────────────
+        self.api_key      = os.getenv("GOOGLE_API_KEY", "")   # Gemini
+        self.groq_api_key = os.getenv("GROQ_API_KEY", "")     # Groq
+
+        # ── Groq-specific params (fixed per requirements) ──────────────
+        # Override via env vars only if explicitly needed.
+        self.groq_temperature = float(os.getenv("GROQ_TEMPERATURE", "0.2"))
+        self.groq_top_p       = float(os.getenv("GROQ_TOP_P", "0.9"))
+        self.groq_max_tokens  = int(os.getenv("GROQ_MAX_TOKENS", "2048"))
+
+        # ── Proxy URL (for vLLM proxy models) ─────────────────────────
         self.proxy_url = os.getenv("LLM_PROXY_URL", "http://localhost:5000")
-        
-        # Log config
+
+        # ── Startup log ────────────────────────────────────────────────
         model_type = self.AVAILABLE_MODELS[self.current_model]["type"]
         print(f"✅ LLM: {self.current_model} ({model_type})")
-        
+
         if model_type == "proxy":
-            print(f"📡 Proxy: {self.proxy_url}")
-    
+            print(f"   📡 Proxy: {self.proxy_url}")
+        elif model_type == "groq":
+            masked = (self.groq_api_key[:8] + "...") if self.groq_api_key else "(not set)"
+            print(f"   🔑 Groq API key: {masked}")
+
     def get_model_config(self, model_key: str) -> dict:
-        """Get configuration for specific model"""
+        """Get configuration for a specific model."""
         return self.AVAILABLE_MODELS.get(model_key, self.AVAILABLE_MODELS["gemini"])
 
 
@@ -143,36 +164,40 @@ class Config:
     """Main configuration class"""
     def __init__(self):
         self.embedding = EmbeddingConfig()
-        self.qdrant = QdrantConfig()
-        self.chunking = ChunkingConfig()
-        self.llm = LLMConfig()
+        self.qdrant    = QdrantConfig()
+        self.chunking  = ChunkingConfig()
+        self.llm       = LLMConfig()
         self.retrieval = RetrievalConfig()
-        self.app = AppConfig()
+        self.app       = AppConfig()
     
     def validate(self) -> bool:
         """Validate configuration"""
         try:
             model_config = self.llm.get_model_config(self.llm.current_model)
-            
-            # Check API key for API models
+
+            # API key checks per model type
             if model_config["type"] == "api":
                 if model_config["provider"] == "google" and not self.llm.api_key:
                     print("❌ GOOGLE_API_KEY not set for Gemini model")
                     return False
-            
-            # Check proxy URL for proxy models
-            if model_config["type"] == "proxy":
+
+            elif model_config["type"] == "groq":
+                if not self.llm.groq_api_key:
+                    print("❌ GROQ_API_KEY not set for Groq model")
+                    return False
+
+            elif model_config["type"] == "proxy":
                 if not self.llm.proxy_url:
                     print("❌ LLM_PROXY_URL not set for proxy model")
                     return False
-            
-            # Check data folder
+
+            # Data folder
             if not os.path.exists(self.app.data_folder):
-                print(f"⚠️ Data folder not found: {self.app.data_folder}")
+                print(f"⚠️  Data folder not found: {self.app.data_folder}")
                 return False
-            
+
             return True
-            
+
         except Exception as e:
             print(f"❌ Configuration validation failed: {e}")
             return False
@@ -186,13 +211,19 @@ class Config:
         print(f"📂 Logs:   {self.app.log_folder}")
         print(f"📂 Models: {self.embedding.cache_folder}")
         print(f"🤖 LLM:    {self.llm.current_model}")
-        
+
         model_config = self.llm.get_model_config(self.llm.current_model)
         print(f"🔧 Type:   {model_config['type']}")
-        
+
         if model_config["type"] == "proxy":
             print(f"📡 Proxy:  {self.llm.proxy_url}")
-        
+        elif model_config["type"] == "groq":
+            masked = (self.llm.groq_api_key[:8] + "...") if self.llm.groq_api_key else "(not set)"
+            print(f"🔑 Groq:   {masked}")
+            print(f"🌡️  temp={self.llm.groq_temperature} | "
+                  f"top_p={self.llm.groq_top_p} | "
+                  f"max_tokens={self.llm.groq_max_tokens}")
+
         print("=" * 60)
 
 

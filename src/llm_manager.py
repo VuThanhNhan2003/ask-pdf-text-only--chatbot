@@ -1,5 +1,5 @@
 """
-LLM Model Manager - Handles API, Remote GPU, and Proxy models
+LLM Model Manager - Handles API, Groq, Remote GPU, and Proxy models
 """
 import logging
 import os
@@ -9,11 +9,16 @@ from abc import ABC, abstractmethod
 
 import httpx
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI          # reused for Groq (OpenAI-compatible)
 
 from config import config
 
 logger = logging.getLogger("RAGProcessor.LLM")
 
+
+# ============================================================
+# Base class
+# ============================================================
 
 class BaseLLM(ABC):
     """Base class for LLM implementations"""
@@ -28,6 +33,10 @@ class BaseLLM(ABC):
         """Stream response"""
         pass
 
+
+# ============================================================
+# Gemini (Google API)
+# ============================================================
 
 class GeminiLLM(BaseLLM):
     """Google Gemini API LLM"""
@@ -48,6 +57,76 @@ class GeminiLLM(BaseLLM):
         for chunk in self.llm.stream(prompt):
             yield chunk.content
 
+
+# ============================================================
+# Groq (OpenAI-compatible API)
+# ============================================================
+
+class GroqLLM(BaseLLM):
+    """
+    Groq API LLM using ChatOpenAI with Groq's OpenAI-compatible endpoint.
+
+    Groq base URL : https://api.groq.com/openai/v1
+    Default model : qwen/qwen3-32b
+    Fixed params  : temperature=0.2, top_p=0.9, max_tokens=2048
+                    (reasoning/thinking mode disabled via extra_body)
+
+    Uses langchain-openai (already in requirements.txt) — no new dependency.
+    """
+
+    GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+
+    def __init__(
+        self,
+        model_name: str,
+        api_key: str,
+        temperature: float = 0.2,
+        max_tokens: int = 2048,
+        top_p: float = 0.9,
+    ):
+        if not api_key:
+            raise ValueError(
+                "GROQ_API_KEY is not set. "
+                "Add it to your .env file: GROQ_API_KEY=gsk_..."
+            )
+
+        # langchain-openai 0.1.x uses `openai_api_base` and `openai_api_key`.
+        # `model_kwargs` is forwarded as extra body params to the Groq endpoint,
+        # which lets us pass top_p.
+        # `extra_body` with thinking disabled is passed via model_kwargs too.
+        self.llm = ChatOpenAI(
+            model=model_name,
+            openai_api_key=api_key,
+            openai_api_base=self.GROQ_BASE_URL,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            model_kwargs={
+                "reasoning_effort": "none"
+            },
+            streaming=True,   # enable streaming support
+        )
+
+        logger.info(
+            f"✅ GroqLLM ready | model={model_name} | "
+            f"temp={temperature} | top_p={top_p} | max_tokens={max_tokens}"
+        )
+
+    def invoke(self, prompt: str) -> str:
+        """Non-streaming generation via Groq."""
+        response = self.llm.invoke(prompt)
+        return response.content
+
+    def stream(self, prompt: str) -> Generator[str, None, None]:
+        """Token-by-token streaming via Groq."""
+        for chunk in self.llm.stream(prompt):
+            if chunk.content:
+                yield chunk.content
+
+
+# ============================================================
+# Proxy (vLLM + Gemini fallback)
+# ============================================================
 
 class ProxyLLM(BaseLLM):
     """
@@ -130,7 +209,6 @@ class ProxyLLM(BaseLLM):
     def invoke(self, prompt: str) -> str:
         """Non-streaming generation via proxy"""
         try:
-            # Prepare request
             payload = {
                 "model": self.model_name,
                 "messages": [
@@ -139,15 +217,12 @@ class ProxyLLM(BaseLLM):
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
                 "stream": False,
-                # Qwen3 AWQ: cần presence_penalty để tránh repetition loop
                 "presence_penalty": float(os.getenv("LLM_PRESENCE_PENALTY", "1.5")),
-                # Tắt thinking mode
                 "chat_template_kwargs": {"enable_thinking": False},
             }
             
             logger.debug(f"→ Calling proxy: {self.proxy_url}/v1/chat/completions")
             
-            # Call proxy
             with httpx.Client(timeout=self.timeout) as client:
                 response = client.post(
                     f"{self.proxy_url}/v1/chat/completions",
@@ -157,10 +232,8 @@ class ProxyLLM(BaseLLM):
                 response.raise_for_status()
                 result = response.json()
                 
-                # Extract content
                 content = result["choices"][0]["message"]["content"]
                 
-                # Log which backend was used
                 model_used = result.get("model", "unknown")
                 if "gemini" in model_used.lower():
                     logger.info(f"✅ Response from Gemini (fallback)")
@@ -198,7 +271,6 @@ class ProxyLLM(BaseLLM):
     def stream(self, prompt: str) -> Generator[str, None, None]:
         """Streaming generation via proxy"""
         try:
-            # Prepare request
             payload = {
                 "model": self.model_name,
                 "messages": [
@@ -207,15 +279,12 @@ class ProxyLLM(BaseLLM):
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
                 "stream": True,
-                # Qwen3 AWQ: cần presence_penalty để tránh repetition loop
                 "presence_penalty": float(os.getenv("LLM_PRESENCE_PENALTY", "1.5")),
-                # Tắt thinking mode
                 "chat_template_kwargs": {"enable_thinking": False},
             }
             
             logger.debug(f"→ Streaming from proxy: {self.proxy_url}")
             
-            # Stream from proxy
             with httpx.Client(timeout=self.timeout) as client:
                 with client.stream(
                     "POST",
@@ -225,29 +294,23 @@ class ProxyLLM(BaseLLM):
                     
                     response.raise_for_status()
                     
-                    # Parse SSE stream
                     for line in response.iter_lines():
                         if not line:
                             continue
                         
-                        # Remove "data: " prefix
                         if line.startswith("data: "):
                             line = line[6:]
                         
-                        # Check for end
                         if line == "[DONE]":
                             break
                         
                         try:
-                            # Parse JSON chunk
                             chunk = json.loads(line)
 
-                            # Proxy may return an explicit error event.
                             if "error" in chunk:
                                 yield f"\n\n[ERROR] {chunk['error']}"
                                 continue
 
-                            # Defensive fallback: handle non-stream chat.completion payload.
                             if "choices" in chunk and isinstance(chunk["choices"], list) and chunk["choices"]:
                                 first_choice = chunk["choices"][0]
                                 message = first_choice.get("message", {}) if isinstance(first_choice, dict) else {}
@@ -255,7 +318,6 @@ class ProxyLLM(BaseLLM):
                                     yield message["content"]
                                     continue
                             
-                            # Extract content
                             if "choices" in chunk:
                                 delta = chunk["choices"][0].get("delta", {})
                                 content = delta.get("content", "")
@@ -264,7 +326,6 @@ class ProxyLLM(BaseLLM):
                                     yield content
                         
                         except json.JSONDecodeError:
-                            # Skip invalid JSON
                             continue
                     
         except httpx.TimeoutException:
@@ -298,12 +359,14 @@ class ProxyLLM(BaseLLM):
                 yield f"\n\n[ERROR] {str(e)}"
 
 
+# ============================================================
+# Deprecated
+# ============================================================
+
 class RemoteGPULLM(BaseLLM):
     """
-    DEPRECATED: Use ProxyLLM instead
-    
-    This class is kept for backward compatibility but should not be used.
-    ProxyLLM provides better reliability with retry and fallback.
+    DEPRECATED: Use ProxyLLM instead.
+    Kept for backward compatibility only.
     """
     
     def __init__(self, api_url: str, model_key: str, temperature: float, max_tokens: int, api_key: str):
@@ -320,6 +383,10 @@ class RemoteGPULLM(BaseLLM):
     def stream(self, prompt: str) -> Generator[str, None, None]:
         raise NotImplementedError("RemoteGPULLM is deprecated. Use ProxyLLM instead.")
 
+
+# ============================================================
+# LLM Manager (factory + cache)
+# ============================================================
 
 class LLMManager:
     """Manages multiple LLM models"""
@@ -342,44 +409,52 @@ class LLMManager:
         
         logger.info(f"🔧 Creating LLM instance: {model_key} (type: {model_config['type']})")
         
-        # Create instance based on type
+        # ----------------------------------------------------------
+        # Instantiate the correct backend
+        # ----------------------------------------------------------
         if model_config["type"] == "api":
-            # API models (Gemini)
+            # Google Gemini
             if model_config["provider"] == "google":
                 llm = GeminiLLM(
                     model_name=model_config["name"],
                     temperature=config.llm.temperature,
                     max_tokens=config.llm.max_output_tokens,
-                    api_key=config.llm.api_key
+                    api_key=config.llm.api_key,
                 )
             else:
                 raise ValueError(f"Unsupported API provider: {model_config['provider']}")
-        
+
+        elif model_config["type"] == "groq":
+            # ── NEW: Groq (OpenAI-compatible) ──────────────────────────
+            llm = GroqLLM(
+                model_name=model_config["name"],
+                api_key=config.llm.groq_api_key,
+                temperature=config.llm.groq_temperature,
+                max_tokens=config.llm.groq_max_tokens,
+                top_p=config.llm.groq_top_p,
+            )
+
         elif model_config["type"] == "proxy":
-            # Proxy models (vLLM via proxy)
+            # vLLM via proxy
             proxy_url = os.getenv("LLM_PROXY_URL", "http://localhost:5000")
-            
             llm = ProxyLLM(
                 proxy_url=proxy_url,
                 model_name=model_config["name"],
                 temperature=config.llm.temperature,
-                max_tokens=config.llm.max_output_tokens
+                max_tokens=config.llm.max_output_tokens,
             )
-        
+
         elif model_config["type"] == "remote":
-            # Legacy remote type - redirect to proxy
-            logger.warning("⚠️ 'remote' type is deprecated. Use 'proxy' type instead.")
-            logger.warning("   Falling back to proxy mode...")
-            
+            # Legacy – redirect to proxy
+            logger.warning("⚠️ 'remote' type is deprecated. Redirecting to proxy mode...")
             proxy_url = os.getenv("LLM_PROXY_URL", "http://localhost:5000")
-            
             llm = ProxyLLM(
                 proxy_url=proxy_url,
                 model_name=model_config["name"],
                 temperature=config.llm.temperature,
-                max_tokens=config.llm.max_output_tokens
+                max_tokens=config.llm.max_output_tokens,
             )
-        
+
         else:
             raise ValueError(f"Unsupported model type: {model_config['type']}")
         

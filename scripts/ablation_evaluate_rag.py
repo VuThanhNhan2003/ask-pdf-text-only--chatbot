@@ -58,7 +58,6 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import processor as processor_module  # noqa: E402
 from processor import (  # noqa: E402
     RAGProcessor,
     HYBRID_TOP_K,
@@ -78,15 +77,6 @@ DEFAULT_CHUNKS_PATH = (
 )
 SCRIPT_VERSION = "eval-rag-2026-04-15-v3"
 
-# Weight sweep presets for score fusion (dense vs BM25).
-WEIGHT_SWEEP_PRESETS = [
-    (1.0, 0.0, "semantic_only"),
-    (0.7, 0.3, "semantic_dominant"),
-    (0.5, 0.5, "balanced"),
-    (0.3, 0.7, "keyword_dominant"),
-    (0.0, 1.0, "bm25_only"),
-]
-
 # ─────────────────────────────────────────────────────────────────────────────
 # ABLATION CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,7 +88,6 @@ class AblationConfig:
     use_dense: bool = True
     use_bm25: bool = True
     use_rerank: bool = True
-    disable_metadata_boosts: bool = False
     description: str = ""
 
     def __post_init__(self):
@@ -138,13 +127,6 @@ ABLATION_MODES: Dict[str, AblationConfig] = {
         use_dense=True,
         use_bm25=True,
         use_rerank=True,
-    ),
-    "full_no_metadata": AblationConfig(
-        name="full_no_metadata",
-        use_dense=True,
-        use_bm25=True,
-        use_rerank=True,
-        disable_metadata_boosts=True,
     ),
 }
 
@@ -204,38 +186,6 @@ def retrieve_with_config(
         return processor.rerank(query, candidates, top_n=top_k)
 
     return candidates[:top_k]
-
-
-def _apply_metadata_boosts(
-    processor: RAGProcessor,
-    enable: bool,
-    baseline: Dict[str, float],
-) -> None:
-    """Toggle metadata boosts (BM25 + rerank) and rebuild BM25 index if needed."""
-    if enable:
-        processor_module.BM25_KEYWORD_BOOST = int(baseline["BM25_KEYWORD_BOOST"])
-        processor_module.BM25_TOPIC_BOOST = int(baseline["BM25_TOPIC_BOOST"])
-        processor_module.RERANK_KEYWORD_BOOST_PER_MATCH = float(
-            baseline["RERANK_KEYWORD_BOOST_PER_MATCH"]
-        )
-        processor_module.RERANK_TOPIC_BOOST = float(baseline["RERANK_TOPIC_BOOST"])
-    else:
-        processor_module.BM25_KEYWORD_BOOST = 0
-        processor_module.BM25_TOPIC_BOOST = 0
-        processor_module.RERANK_KEYWORD_BOOST_PER_MATCH = 0.0
-        processor_module.RERANK_TOPIC_BOOST = 0.0
-
-    # BM25 index depends on boost values; rebuild to keep scores consistent.
-    processor._build_bm25_index_from_qdrant()
-
-
-def _apply_score_fusion_weights(alpha: float, beta: float, baseline_mode: str) -> None:
-    """Apply score-fusion weights and ensure score-fusion mode is enabled."""
-    processor_module.HYBRID_MODE = "score"
-    processor_module.HYBRID_ALPHA = float(alpha)
-    processor_module.HYBRID_BETA = float(beta)
-    if not baseline_mode:
-        return
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1067,10 +1017,6 @@ def evaluate_queries(
             "query_id":                 item.query_id,
             "query":                    item.query,
             "ablation_mode":            ablation_cfg.name,          # ← NEW
-            "metadata_boosts":          "off" if ablation_cfg.disable_metadata_boosts else "on",
-            "hybrid_mode":              processor_module.HYBRID_MODE,
-            "hybrid_alpha":             processor_module.HYBRID_ALPHA,
-            "hybrid_beta":              processor_module.HYBRID_BETA,
             "ground_truth_count":       len(item.ground_truth_ids),
             "ground_truth_ids":         item.ground_truth_ids,
             "retrieved_ids":            retrieved_ids,
@@ -1171,10 +1117,6 @@ def evaluate_queries(
     summary: Dict[str, Any] = {
         "ablation_mode":  ablation_cfg.name,
         "description":    ablation_cfg.description,
-        "metadata_boosts": "off" if ablation_cfg.disable_metadata_boosts else "on",
-        "hybrid_mode":     processor_module.HYBRID_MODE,
-        "hybrid_alpha":    processor_module.HYBRID_ALPHA,
-        "hybrid_beta":     processor_module.HYBRID_BETA,
         "query_count":    int(len(df)),
         "top_k":          int(top_k),
         "metrics_avg":    {},
@@ -1227,24 +1169,11 @@ def run_ablation_study(
     dfs:     Dict[str, pd.DataFrame] = {}
     results: Dict[str, Any]           = {}
 
-    baseline_boosts = {
-        "BM25_KEYWORD_BOOST": processor_module.BM25_KEYWORD_BOOST,
-        "BM25_TOPIC_BOOST": processor_module.BM25_TOPIC_BOOST,
-        "RERANK_KEYWORD_BOOST_PER_MATCH": processor_module.RERANK_KEYWORD_BOOST_PER_MATCH,
-        "RERANK_TOPIC_BOOST": processor_module.RERANK_TOPIC_BOOST,
-    }
-
     for mode_name in modes:
         cfg = ABLATION_MODES[mode_name]
         print(f"\n{'='*80}")
         print(f"  Ablation mode: {mode_name.upper()}  ({cfg.description})")
         print(f"{'='*80}")
-
-        _apply_metadata_boosts(
-            processor,
-            enable=not cfg.disable_metadata_boosts,
-            baseline=baseline_boosts,
-        )
 
         df, summary = evaluate_queries(
             processor=processor,
@@ -1262,64 +1191,6 @@ def run_ablation_study(
         results[mode_name] = summary
 
         _print_mode_summary(mode_name, summary)
-
-    return dfs, results
-
-
-def run_weight_sweep(
-    processor: RAGProcessor,
-    queries: List[EvalQuery],
-    chunk_lookup: Dict[str, NormalizedChunk],
-    top_k: int,
-    run_generation: bool,
-    generation_context_k: int,
-    concise_mode: bool,
-    answer_compaction: bool,
-    use_rerank: bool,
-) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
-    """Run score-fusion weight sweep using the requested retrieval stack."""
-    dfs: Dict[str, pd.DataFrame] = {}
-    results: Dict[str, Any] = {}
-
-    baseline_mode = processor_module.HYBRID_MODE
-    baseline_alpha = processor_module.HYBRID_ALPHA
-    baseline_beta = processor_module.HYBRID_BETA
-
-    sweep_cfg = ABLATION_MODES["full"] if use_rerank else ABLATION_MODES["hybrid_no_rerank"]
-
-    for alpha, beta, label in WEIGHT_SWEEP_PRESETS:
-        mode_name = f"weight_{alpha:.2f}_{beta:.2f}"
-        print(f"\n{'='*80}")
-        print(f"  Weight sweep: {mode_name}  ({label})")
-        print(f"{'='*80}")
-
-        _apply_score_fusion_weights(alpha, beta, baseline_mode)
-
-        df, summary = evaluate_queries(
-            processor=processor,
-            queries=queries,
-            chunk_lookup=chunk_lookup,
-            top_k=top_k,
-            run_generation=run_generation,
-            generation_context_k=generation_context_k,
-            concise_mode=concise_mode,
-            answer_compaction=answer_compaction,
-            ablation_cfg=sweep_cfg,
-        )
-
-        summary["weight_label"] = label
-        summary["hybrid_mode"] = "score"
-        summary["hybrid_alpha"] = float(alpha)
-        summary["hybrid_beta"] = float(beta)
-
-        dfs[mode_name] = df
-        results[mode_name] = summary
-
-        _print_mode_summary(mode_name, summary)
-
-    processor_module.HYBRID_MODE = baseline_mode
-    processor_module.HYBRID_ALPHA = baseline_alpha
-    processor_module.HYBRID_BETA = baseline_beta
 
     return dfs, results
 
@@ -1420,16 +1291,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-answer-compaction", action="store_true")
     parser.add_argument("--skip-generation",       action="store_true")
     parser.add_argument(
-        "--weight-sweep",
-        action="store_true",
-        help="Run score-fusion weight sweep presets (uses full retrieval stack only).",
-    )
-    parser.add_argument(
-        "--weight-sweep-no-rerank",
-        action="store_true",
-        help="Run score-fusion weight sweep presets with rerank disabled.",
-    )
-    parser.add_argument(
         "--mode",
         type=str,
         default="full",
@@ -1507,10 +1368,6 @@ def main() -> int:
     print(f"Answer compaction : {'OFF' if args.disable_answer_compaction else 'ON'}")
     print(f"Generation eval   : {'OFF' if args.skip_generation else 'ON'}")
     print(f"Ablation modes    : {', '.join(modes_to_run)}")
-    print(
-        f"Weight sweep      : {'ON' if args.weight_sweep else 'OFF'}"
-        f" (no rerank={'ON' if args.weight_sweep_no_rerank else 'OFF'})"
-    )
     print("\nQuery-set diagnostics:")
     print(f"  avg_ground_truth_count      : {query_set_diagnostics['avg_ground_truth_count']:.4f}")
     print(f"  single_ground_truth_ratio   : {query_set_diagnostics['single_ground_truth_ratio']:.4f}")
@@ -1528,31 +1385,17 @@ def main() -> int:
         return 1
 
     # ── run ablation study ────────────────────────────────────────────────────
-    if args.weight_sweep or args.weight_sweep_no_rerank:
-        dfs, results = run_weight_sweep(
-            processor=processor,
-            queries=eval_queries,
-            chunk_lookup=chunk_lookup,
-            top_k=args.top_k,
-            run_generation=not args.skip_generation,
-            generation_context_k=args.generation_context_k,
-            concise_mode=not args.loose_answer_style,
-            answer_compaction=not args.disable_answer_compaction,
-            use_rerank=not args.weight_sweep_no_rerank,
-        )
-        modes_to_run = list(results.keys())
-    else:
-        dfs, results = run_ablation_study(
-            processor=processor,
-            queries=eval_queries,
-            chunk_lookup=chunk_lookup,
-            top_k=args.top_k,
-            run_generation=not args.skip_generation,
-            generation_context_k=args.generation_context_k,
-            concise_mode=not args.loose_answer_style,
-            answer_compaction=not args.disable_answer_compaction,
-            modes=modes_to_run,
-        )
+    dfs, results = run_ablation_study(
+        processor=processor,
+        queries=eval_queries,
+        chunk_lookup=chunk_lookup,
+        top_k=args.top_k,
+        run_generation=not args.skip_generation,
+        generation_context_k=args.generation_context_k,
+        concise_mode=not args.loose_answer_style,
+        answer_compaction=not args.disable_answer_compaction,
+        modes=modes_to_run,
+    )
 
     # ── comparison table (only meaningful when > 1 mode) ────────────────────
     if len(modes_to_run) > 1:
@@ -1572,9 +1415,6 @@ def main() -> int:
         "skip_generation":      args.skip_generation,
         "random_seed":          args.random_seed,
         "ablation_modes":       modes_to_run,
-        "weight_sweep":         args.weight_sweep,
-        "weight_sweep_no_rerank": args.weight_sweep_no_rerank,
-        "weight_presets":       WEIGHT_SWEEP_PRESETS,
         "query_set_diagnostics": query_set_diagnostics,
         "timestamp":            datetime.now().isoformat(),
         "script_version":       SCRIPT_VERSION,
