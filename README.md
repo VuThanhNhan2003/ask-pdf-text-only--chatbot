@@ -1,92 +1,114 @@
-# 📚 Ask PDF — RAG Chatbot for Education
+# 📚 Advanced RAG for Educational Q&A
 
 <p align="center">
-  <strong>Hệ thống hỏi đáp tài liệu PDF, video thông minh cho sinh viên MOOC, sử dụng Retrieval-Augmented Generation (RAG)</strong>
+  <strong>A production-oriented, advanced Retrieval-Augmented Generation (RAG) system designed for educational Q&A.</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/Streamlit-1.49-FF4B4B?logo=streamlit&logoColor=white" alt="Streamlit">
+  <img src="https://img.shields.io/badge/Streamlit-1.x-FF4B4B?logo=streamlit&logoColor=white" alt="Streamlit">
+  <img src="https://img.shields.io/badge/FastAPI-0.110-05998b?logo=fastapi&logoColor=white" alt="FastAPI">
   <img src="https://img.shields.io/badge/LangChain-0.2-green?logo=langchain" alt="LangChain">
   <img src="https://img.shields.io/badge/Qdrant-Vector_DB-DC382D" alt="Qdrant">
   <img src="https://img.shields.io/badge/PostgreSQL-15-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL">
   <img src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white" alt="Docker">
 </p>
 
----
-
-## 📖 Giới thiệu
-
-**Ask PDF** là một chatbot RAG hỗ trợ sinh viên tra cứu và hỏi đáp nội dung từ tài liệu PDF theo nhiều môn học. Hệ thống trích xuất văn bản từ PDF, tạo embedding vector, lưu trữ vào Qdrant và sử dụng LLM để sinh câu trả lời chính xác dựa trên ngữ cảnh tài liệu gốc.
-
-### Tính năng chính
-
-- **Hỏi đáp đa môn học** — Tổ chức tài liệu theo từng môn (Giải tích 1, Thống kê trong kinh doanh, Vật lý 2, ...)
-- **Xác thực người dùng** — Đăng ký / đăng nhập bảo mật với bcrypt
-- **Quản lý hội thoại** — Lưu lịch sử chat, ghim, lưu trữ, xoá cuộc hội thoại
-- **Hybrid LLM** — Hỗ trợ Google Gemini API và local vLLM (Qwen3-8B-AWQ) với cơ chế fallback tự động
-- **Streaming Response** — Phản hồi theo thời gian thực
-- **Chia sẻ hội thoại** — Chia sẻ cuộc trò chuyện qua token bảo mật
+This project provides a complete, production-oriented RAG stack for answering questions grounded in educational documents. It features a sophisticated retrieval pipeline with hybrid search and reranking, a resilient LLM serving layer, and multiple user interfaces including a Streamlit app and a deployable web widget.
 
 ---
 
-## 🏗️ Kiến trúc hệ thống
+## 📖 Introduction
+
+This system is an **advanced RAG implementation** that goes beyond basic vector search. It is designed for high accuracy and relevance in a real-world educational setting.
+
+### Key Features
+
+- **Advanced Retrieval Pipeline**:
+  - **Hybrid Search**: Combines dense (semantic) and lexical (BM25 keyword) search for robustness against both conceptual and keyword-based queries.
+  - **Configurable Fusion**: Supports weighted score fusion and Reciprocal Rank Fusion (RRF) to merge search results.
+  - **Cross-Encoder Reranking**: A second-stage reranker (`BAAI/bge-reranker-v2-m3`) refines candidate chunks for maximum relevance before generation.
+  - **Metadata-Aware Search**: Boosts chunks based on keyword and topic metadata during both lexical search and reranking.
+- **Multi-Source Ingestion**: Indexes documents from raw PDFs and pre-chunked structured JSON files.
+- **Resilient LLM Serving**:
+  - **LLM Abstraction**: Supports multiple backends including Google Gemini, Groq, and local models via a vLLM proxy.
+  - **Proxy with Fallback**: The proxy layer includes health checks, retries, and automatic fallback to the Gemini API if the local vLLM is unavailable.
+- **Multiple Interfaces**:
+  - **Streamlit Web App**: A full-featured chat interface for students and administrators.
+  - **Embeddable Web Widget**: A self-contained JavaScript widget that can be embedded on any website for direct Q&A.
+- **Developer-Focused Tooling**:
+  - **Debug Endpoint**: An API endpoint (`/query/debug`) provides a detailed breakdown of retrieval scores (dense, BM25, hybrid, rerank) for analysis and tuning.
+  - **Evaluation Suite**: A comprehensive script (`scripts/evaluate_rag_english.py`) for end-to-end evaluation of retrieval and generation quality using standard metrics (nDCG, MRR) and RAGAS.
+
+### User-Facing Features
+
+- **Multi-Subject Q&A** — Organizes documents by subject (e.g., Calculus 1, Business Statistics, Physics 2).
+- **User Authentication** — Secure registration/login with bcrypt.
+- **Conversation Management** — Saves chat history, pins, archives, and deletes conversations.
+- **Streaming Response** — Real-time responses.
+- **Share Conversation** — Shares conversations via a secure token.
+
+---
+
+## 🏗️ System Architecture
+
+The application is composed of several services orchestrated by Docker Compose: a Streamlit web UI, a FastAPI backend for the RAG service, a PostgreSQL database, a Qdrant vector database, and a proxy for the LLM.
+
+### Services
+
+| Service | Port | Description |
+|---|---|---|
+| **app** | `8501` | Streamlit Web UI |
+| **chatbot_api** | `9100` | FastAPI RAG service |
+| **llm_proxy** | `5000` | FastAPI LLM Proxy |
+| **qdrant** | `6333` | Vector Database |
+| **postgres** | `5432` | SQL Database |
+
+---
+
+## ⚙️ RAG Pipeline Details
+
+The query processing flow is designed to maximize relevance and accuracy.
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                STREAMLIT WEB UI (app_v2.py)               │
-│   Auth UI  ·  Chat Interface  ·  Conversation Sidebar     │
-└──────────────────────┬───────────────────────────────────┘
-                       │
-        ┌──────────────┴──────────────┐
-        ▼                             ▼
-┌───────────────────┐    ┌─────────────────────────┐
-│   RAGProcessor    │    │      LLMManager         │
-│  (processor.py)   │    │   (llm_manager.py)      │
-│                   │    │                         │
-│ · PDF ingestion   │    │ · Gemini API client     │
-│ · Text chunking   │    │ · Proxy LLM client      │
-│ · Embedding       │    │ · Model caching         │
-│ · Vector search   │    │ · Streaming support     │
-└────────┬──────────┘    └────────────┬────────────┘
-         │                            │
-         ▼                            ▼
-┌────────────────┐       ┌─────────────────────────┐
-│   Qdrant VDB   │       │  LLM Proxy (FastAPI)    │
-│   (port 6333)  │       │     (port 5000)         │
-└────────────────┘       │                         │
-                         │  vLLM ──► Gemini (fallback)
-                         └─────────────────────────┘
-         │
-         ▼
-┌────────────────┐
-│  PostgreSQL    │
-│  (port 5432)   │
-│                │
-│ Users · Conversations · Messages · Settings
-└────────────────┘
-```
-
-### Luồng xử lý câu hỏi
-
-```
-Câu hỏi → Embedding (sentence-transformers) → Tìm kiếm Qdrant (top-K)
-    → Xây dựng context (tài liệu + lịch sử hội thoại)
-    → Gửi đến LLM → Streaming response → Lưu vào PostgreSQL
+User Question
+    ↓
+[Embedding] → BAAI/bge-m3
+    ↓
+┌───────────────────────────────────┐
+│         Hybrid Retrieval          │
+├───────────────────────────────────┤
+│ 1. Dense Search (Qdrant)          │ → Top-k semantic results
+│ 2. Lexical Search (BM25)          │ → Top-k keyword results
+└───────────────────────────────────┘
+    ↓
+[Fusion: Score-based or RRF]
+    ↓
+[Candidate Pool Sizing]
+    ↓
+[Cross-Encoder Reranking] → BAAI/bge-reranker-v2-m3
+    ↓
+Top-N final chunks for context
+    ↓
+[Prompt Building + Chat History]
+    ↓
+[LLM Generation (Gemini / Groq / vLLM)]
+    ↓
+Answer + Sources
 ```
 
 ---
 
 ## 🛠️ Tech Stack
 
-| Layer | Công nghệ |
-|-------|-----------|
+| Layer | Technology |
+|---|---|
 | **Frontend** | Streamlit 1.49 |
-| **LLM Framework** | LangChain 0.2, Google Gemini 2.5 Flash, Qwen3-8B-AWQ (vLLM) |
-| **Embedding** | sentence-transformers (all-MiniLM-L6-v2) |
+| **Backend & API** | FastAPI, Uvicorn |
+| **LLM & RAG** | LangChain 0.2, Google Gemini, Groq, Qwen3 (vLLM) |
+| **Embedding & Reranking** | Sentence Transformers (`BAAI/bge-m3`, `BAAI/bge-reranker-v2-m3`) |
 | **Vector DB** | Qdrant |
 | **Database** | PostgreSQL 15 + SQLAlchemy ORM |
-| **LLM Proxy** | FastAPI + Uvicorn |
 | **PDF Parsing** | PyMuPDF + pymupdf4llm |
 | **Auth** | bcrypt |
 | **ML Backend** | PyTorch 2.8 (CPU) / OnnxRuntime / Openvino |
@@ -94,53 +116,47 @@ Câu hỏi → Embedding (sentence-transformers) → Tìm kiếm Qdrant (top-K)
 
 ---
 
-## 📁 Cấu trúc dự án
+## 📁 Project Structure
 
 ```
 rag-pipeline/
 ├── src/                        # Core application
 │   ├── app_v2.py               # Streamlit main app & UI
+│   ├── api_service.py          # FastAPI RAG service
 │   ├── config.py               # Configuration classes
 │   ├── processor.py            # RAG pipeline (ingest, embed, search, generate)
 │   ├── llm_manager.py          # LLM abstraction layer
 │   └── llm_proxy.py            # FastAPI proxy server (vLLM + Gemini fallback)
 ├── auth/
 │   └── authentication.py       # User auth service (signup, login, password hashing)
-├── components/
-│   └── auth_ui.py              # Streamlit auth UI components
 ├── database/
 │   ├── database.py             # SQLAlchemy session management
 │   └── models.py               # ORM models (User, Conversation, Message, ...)
 ├── services/
-│   └── conversation_service.py # Business logic cho hội thoại & tin nhắn
-├── data/                       # Thư mục chứa PDF theo môn học
-│   ├── Giai tich 1/
-│   ├── Môn Thống kê trong kinh doanh/
-│   └── Vật lý 2/
+│   └── conversation_service.py # Business logic for conversations & messages
+├── data/                       # Directory for document by subject
+│   ├── source_docs/
+│   └── processed_chunks/
 ├── models/                     # Pre-downloaded models
-│   ├── all-MiniLM-L6-v2/      # Embedding model
-│   └── llm/                    # LLM weights (Qwen3-8B-AWQ)
 ├── docker/
 │   ├── docker-compose.yml      # Multi-service orchestration
 │   ├── Dockerfile              # Main app image
 │   └── Dockerfile.proxy        # LLM proxy image
-├── vpn_config/                 # Scripts kết nối GPU server qua VPN
-├── logs/                       # Application logs
 ├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## 🚀 Cài đặt & Chạy
+## 🚀 Installation & Usage
 
-### Yêu cầu
+### Prerequisites
 
 - **Python** 3.11+
-- **Docker** & **Docker Compose** (khuyến nghị)
-- **Google API Key** (cho Gemini fallback)
+- **Docker** & **Docker Compose** (recommended)
+- **Google API Key** (for Gemini fallback)
 
-### 1. Clone & cài đặt dependencies
+### 1. Clone & Install Dependencies
 
 ```bash
 git clone <repository-url>
@@ -151,16 +167,19 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Cấu hình environment
+### 2. Configure Environment
 
-Tạo file `.env` ở thư mục gốc:
+Create a `.env` file in the root directory:
 
 ```env
 # Google Gemini API
 GOOGLE_API_KEY=your_google_api_key
 
+# Groq API
+GROQ_API_KEY=your_groq_api_key
+
 # PostgreSQL
-DATABASE_URL=postgresql://chatbot_user:chatbot_pass_2024@localhost:5432/chatbot_db
+POSTGRES_PASSWORD=your_postgres_password
 
 # Qdrant
 QDRANT_URL=http://localhost:6333
@@ -168,86 +187,77 @@ QDRANT_COLLECTION=documents
 
 # LLM Proxy
 LLM_PROXY_URL=http://localhost:5000
-LLM_MODEL=qwen3-8b          # hoặc "gemini"
+LLM_MODEL=qwen3-8b          # or "gemini" or "groq"
 
 # LLM Parameters
 LLM_TEMPERATURE=0.7
 LLM_MAX_OUTPUT_TOKENS=2048
 ```
 
-### 3. Khởi chạy với Docker (khuyến nghị)
+### 3. Launch with Docker (Recommended)
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-Các service sẽ chạy:
+Access the application at: **http://localhost:8501**
 
-| Service | Port | Mô tả |
-|---------|------|--------|
-| **app** | `8501` | Streamlit Web UI |
-| **llm_proxy** | `5000` | FastAPI LLM Proxy |
-| **qdrant** | `6333` | Vector Database |
-| **postgres** | `5432` | SQL Database |
+### 4. Add Documents
 
-Truy cập ứng dụng tại: **http://localhost:8501**
+Place your documents into the `data/source_docs/` directory, organized by subject. The application supports PDF files and pre-chunked JSON files.
 
-### 4. Khởi chạy thủ công (development)
-
-```bash
-# Khởi tạo database
-python -c "from database.database import init_db; init_db()"
-
-# Chạy LLM Proxy
-uvicorn src.llm_proxy:app --host 0.0.0.0 --port 5000 &
-
-# Chạy Streamlit
-streamlit run src/app_v2.py
+**For PDF files:**
 ```
-
-### 5. Thêm tài liệu PDF
-
-Đặt file PDF vào thư mục `data/` theo cấu trúc môn học:
-
-```
-data/
-├── Giải tích 1/
-│   ├── chuong1.pdf
-│   └── chuong2.pdf
-├── Thống kê trong kinh doanh/
+data/source_docs/
+├── Calculus 1/
+│   ├── chapter1.pdf
+│   └── chapter2.pdf
+├── Business Statistics/
 │   └── textbook.pdf
-└── Vật lý 2/
+└── Physics 2/
     └── lecture_notes.pdf
 ```
 
-Tài liệu sẽ được tự động ingest khi ứng dụng khởi chạy.
+**For pre-chunked JSON files:**
+Place your JSON files in the `data/processed_chunks/` directory, following the same subject-based structure.
+
+The documents will be automatically ingested when the application starts.
 
 ---
 
-## ⚙️ Cấu hình chi tiết
+## ⚙️ Detailed Configuration
 
-Các class cấu hình được định nghĩa trong `src/config.py`:
+Configuration classes are defined in `src/config.py`:
 
-| Class | Mô tả | Tham số quan trọng |
-|-------|--------|-------------------|
+| Class | Description | Key Parameters |
+|---|---|---|
 | `EmbeddingConfig` | Embedding model | `model_name`, `batch_size`, `local_path` |
 | `QdrantConfig` | Vector DB | `host`, `port` (6333), `collection_name` |
-| `ChunkingConfig` | Chia nhỏ văn bản | `chunk_size` (1000), `chunk_overlap` (200) |
+| `ChunkingConfig` | Text chunking | `chunk_size` (1000), `chunk_overlap` (200) |
 | `LLMConfig` | LLM selection | `current_model`, `temperature`, `proxy_url` |
-| `RetrievalConfig` | Tìm kiếm RAG | `top_k` (5), `score_threshold` (0.3) |
-| `AppConfig` | UI & đường dẫn | `data_folder`, `log_folder`, `page_title` |
+| `RetrievalConfig` | RAG search | `top_k` (5), `score_threshold` (0.3) |
+| `AppConfig` | UI & paths | `data_folder`, `log_folder`, `page_title` |
 
-### Các model LLM hỗ trợ
+### Supported LLM Models
+
+The application supports multiple LLMs, configured in `src/config.py`. The `LLMManager` class handles the selection and instantiation of the appropriate LLM.
 
 ```python
 AVAILABLE_MODELS = {
-    "gemini": {          # Google Gemini 2.5 Flash (API)
+    "gemini": {
         "type": "api",
-        "provider": "google"
+        "provider": "google",
+        "name": "gemini-2.5-flash"
     },
-    "qwen3-8b": {        # Qwen 3-8B Instruct (vLLM local)
+    "groq": {
+        "type": "groq",
+        "provider": "groq",
+        "name": "qwen/qwen3-32b"
+    },
+    "qwen3-8b": {
         "type": "proxy",
-        "provider": "vllm"
+        "provider": "vllm",
+        "name": "Qwen/Qwen3-8B-AWQ"
     }
 }
 ```
@@ -256,85 +266,54 @@ AVAILABLE_MODELS = {
 
 ## 🗄️ Database Schema
 
-```
-┌──────────────┐     ┌──────────────────┐     ┌──────────────────────┐
-│    users     │────►│  conversations   │────►│      messages        │
-├──────────────┤     ├──────────────────┤     ├──────────────────────┤
-│ id           │     │ id               │     │ id                   │
-│ email        │     │ user_id (FK)     │     │ conversation_id (FK) │
-│ username     │     │ title            │     │ role (user/assistant)│
-│ password_hash│     │ subject          │     │ content              │
-│ full_name    │     │ is_pinned        │     │ sources (JSON)       │
-│ is_active    │     │ is_archived      │     │ tokens_used          │
-│ is_admin     │     │ created_at       │     │ processing_time      │
-│ created_at   │     │ updated_at       │     │ is_deleted           │
-│ last_login   │     └──────────────────┘     │ created_at           │
-└──────┬───────┘              │                └──────────────────────┘
-       │              ┌───────┴────────────┐
-       │              │shared_conversations│
-       ▼              ├────────────────────┤
-┌──────────────┐      │ id                 │
-│user_settings │      │ conversation_id(FK)│
-├──────────────┤      │ share_token        │
-│ user_id (FK) │      │ is_active          │
-│ theme        │      │ view_count         │
-│ language     │      │ expires_at         │
-│ temperature  │      └────────────────────┘
-│ max_tokens   │
-│ top_k        │
-└──────────────┘
-```
+The database schema is defined using SQLAlchemy ORM in `database/models.py`.
+
+- **users**: Stores user account information.
+- **user_settings**: Stores user preferences.
+- **conversations**: Stores chat sessions.
+- **messages**: Stores individual messages within a conversation.
+- **shared_conversations**: Stores information about publicly shared conversations.
 
 ---
 
-## 🔌 API Endpoints (LLM Proxy)
+## 🔌 API Endpoints (FastAPI Service - Port 9100)
 
-| Endpoint | Method | Mô tả |
-|----------|--------|--------|
-| `/` | GET | Trạng thái service |
-| `/health` | GET | Health check (số server healthy) |
-| `/servers` | GET | Danh sách server và trạng thái |
-| `/v1/chat/completions` | POST | Chat completion (OpenAI-compatible, hỗ trợ streaming) |
+The `chatbot_api` service provides a set of endpoints to interact with the RAG pipeline.
 
----
-
-## 🔐 Xác thực
-
-- **Đăng ký**: Email + username + password (tối thiểu 6 ký tự)
-- **Mật khẩu**: Mã hóa bằng bcrypt với salt
-- **Phiên đăng nhập**: Quản lý qua Streamlit session state
-- **Đổi mật khẩu**: Xác thực mật khẩu cũ trước khi thay đổi
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | GET | Health check |
+| `/models` | GET | List available LLM models |
+| `/subjects` | GET | List loaded subjects |
+| `/query` | POST | Answer a question (non-streaming) |
+| `/query/debug` | POST | Answer a question with retrieval debug information |
+| `/query/stream` | POST | Answer a question (streaming via Server-Sent Events) |
+| `/reload` | POST | Reload data into the vector store |
 
 ---
 
 ## 🐳 Docker
 
+The `docker-compose.yml` file orchestrates the different services of the application.
+
 ### Services
 
-```yaml
-services:
-  postgres:     # PostgreSQL 15-alpine — port 5432
-  qdrant:       # Qdrant vector DB   — port 6333
-  llm_proxy:    # FastAPI proxy       — port 5000
-  app:          # Streamlit UI        — port 8501
-```
-
-### Health Checks
-
-- **PostgreSQL**: `pg_isready` (10s interval)
-- **LLM Proxy**: HTTP `/health` (30s interval, 3 retries)
-- **App**: Phụ thuộc vào postgres, qdrant, llm_proxy healthy
+- **postgres**: PostgreSQL database.
+- **qdrant**: Qdrant vector database.
+- **llm_proxy**: FastAPI proxy for vLLM with Gemini fallback.
+- **app**: Streamlit web UI.
+- **chatbot_api**: FastAPI RAG service.
 
 ### Build & Deploy
 
 ```bash
-# Build và chạy tất cả services
+# Build and run all services
 docker compose -f docker/docker-compose.yml up -d --build
 
-# Xem logs
+# View logs
 docker compose -f docker/docker-compose.yml logs -f app
 
-# Dừng tất cả
+# Stop all services
 docker compose -f docker/docker-compose.yml down
 ```
 
@@ -342,23 +321,23 @@ docker compose -f docker/docker-compose.yml down
 
 ## 📝 Logging
 
-- **File log**: `logs/rag_YYYYMMDD.log` (xoay vòng theo ngày)
-- **Console**: Chỉ hiển thị WARNING trở lên
+- **File log**: `logs/rag_YYYYMMDD.log` (daily rotation)
+- **Console**: Displays WARNING level and above
 - **Format**: `Timestamp | Logger | Level | Message`
 
 ---
 
 ## 🛣️ Roadmap
 
-- [ ] Admin dashboard quản lý người dùng
-- [ ] Hỗ trợ thêm định dạng file (DOCX, PPTX)
+- [ ] Admin dashboard for user management
+- [ ] Support for more file formats (DOCX, PPTX)
 - [ ] Token-based authentication (JWT)
 - [ ] Multi-language support
-- [ ] Export hội thoại ra PDF
-- [ ] Analytics & thống kê sử dụng
+- [ ] Export conversation to PDF
+- [ ] Analytics & usage statistics
 
 ---
 
 ## 📄 License
 
-Dự án này được phát triển cho mục đích giáo dục.
+This project is developed for educational purposes.
