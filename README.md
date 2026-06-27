@@ -1,343 +1,309 @@
-# 📚 Advanced RAG for Educational Q&A
+# 📚 Advanced RAG Chatbot for Educational Q&A
 
 <p align="center">
-  <strong>A production-oriented, advanced Retrieval-Augmented Generation (RAG) system designed for educational Q&A.</strong>
+  <strong>A production-oriented Retrieval-Augmented Generation (RAG) system for student Q&A on MOOC course materials.<br>
+  Part of a three-pipeline multimodal ingestion architecture.</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/Streamlit-1.x-FF4B4B?logo=streamlit&logoColor=white" alt="Streamlit">
+  <img src="https://img.shields.io/badge/Streamlit-1.49-FF4B4B?logo=streamlit&logoColor=white" alt="Streamlit">
   <img src="https://img.shields.io/badge/FastAPI-0.110-05998b?logo=fastapi&logoColor=white" alt="FastAPI">
-  <img src="https://img.shields.io/badge/LangChain-0.2-green?logo=langchain" alt="LangChain">
+  <img src="https://img.shields.io/badge/LangChain-0.2-green" alt="LangChain">
   <img src="https://img.shields.io/badge/Qdrant-Vector_DB-DC382D" alt="Qdrant">
   <img src="https://img.shields.io/badge/PostgreSQL-15-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL">
   <img src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white" alt="Docker">
 </p>
 
-This project provides a complete, production-oriented RAG stack for answering questions grounded in educational documents. It features a sophisticated retrieval pipeline with hybrid search and reranking, a resilient LLM serving layer, and multiple user interfaces including a Streamlit app and a deployable web widget.
-
 ---
 
-## 📖 Introduction
+## Overview
 
-This system is an **advanced RAG implementation** that goes beyond basic vector search. It is designed for high accuracy and relevance in a real-world educational setting.
+This repository is the **RAG pipeline** — the final stage of a three-pipeline knowledge system for MOOC platforms:
 
-### Key Features
-
-- **Advanced Retrieval Pipeline**:
-  - **Hybrid Search**: Combines dense (semantic) and lexical (BM25 keyword) search for robustness against both conceptual and keyword-based queries.
-  - **Configurable Fusion**: Supports weighted score fusion and Reciprocal Rank Fusion (RRF) to merge search results.
-  - **Cross-Encoder Reranking**: A second-stage reranker (`BAAI/bge-reranker-v2-m3`) refines candidate chunks for maximum relevance before generation.
-  - **Metadata-Aware Search**: Boosts chunks based on keyword and topic metadata during both lexical search and reranking.
-- **Multi-Source Ingestion**: Indexes documents from raw PDFs and pre-chunked structured JSON files.
-- **Resilient LLM Serving**:
-  - **LLM Abstraction**: Supports multiple backends including Google Gemini, Groq, and local models via a vLLM proxy.
-  - **Proxy with Fallback**: The proxy layer includes health checks, retries, and automatic fallback to the Gemini API if the local vLLM is unavailable.
-- **Multiple Interfaces**:
-  - **Streamlit Web App**: A full-featured chat interface for students and administrators.
-  - **Embeddable Web Widget**: A self-contained JavaScript widget that can be embedded on any website for direct Q&A.
-- **Developer-Focused Tooling**:
-  - **Debug Endpoint**: An API endpoint (`/query/debug`) provides a detailed breakdown of retrieval scores (dense, BM25, hybrid, rerank) for analysis and tuning.
-  - **Evaluation Suite**: A comprehensive script (`scripts/evaluate_rag_english.py`) for end-to-end evaluation of retrieval and generation quality using standard metrics (nDCG, MRR) and RAGAS.
-
-### User-Facing Features
-
-- **Multi-Subject Q&A** — Organizes documents by subject (e.g., Calculus 1, Business Statistics, Physics 2).
-- **User Authentication** — Secure registration/login with bcrypt.
-- **Conversation Management** — Saves chat history, pins, archives, and deletes conversations.
-- **Streaming Response** — Real-time responses.
-- **Share Conversation** — Shares conversations via a secure token.
-
----
-
-## 🏗️ System Architecture
-
-The application is composed of several services orchestrated by Docker Compose: a Streamlit web UI, a FastAPI backend for the RAG service, a PostgreSQL database, a Qdrant vector database, and a proxy for the LLM.
-
-### Services
-
-| Service | Port | Description |
+| Pipeline | Repository | Output |
 |---|---|---|
-| **app** | `8501` | Streamlit Web UI |
-| **chatbot_api** | `9100` | FastAPI RAG service |
-| **llm_proxy** | `5000` | FastAPI LLM Proxy |
-| **qdrant** | `6333` | Vector Database |
-| **postgres** | `5432` | SQL Database |
+| **ASR** | [whisper-project](https://github.com/VuThanhNhan2003/whisper-project) | Lecture video → Faster-Whisper → TextNode JSON |
+| **Vision / VLM** | [`extracting_pdf_pipeline/`](./extracting_pdf_pipeline/) | Course documents → Qwen3-VL-8B → TextNode JSON |
+| **RAG Chatbot** ← *this repo* | — | TextNode JSON → Qdrant → answers |
+
+Both upstream pipelines produce a shared **TextNode JSON** format (chunk + structured metadata), which this chatbot ingests directly. There are no raw PDF files involved at the retrieval stage.
+
+> **To use this chatbot you must first generate TextNode JSON files using the two pipelines above.** The `data/` folder and ground-truth evaluation files are excluded from this repository (see `.gitignore`).
 
 ---
 
-## ⚙️ RAG Pipeline Details
+## Key Technical Features
 
-The query processing flow is designed to maximize relevance and accuracy.
+**Retrieval**
+- Hybrid search combining dense (BAAI/bge-m3) and sparse (BM25) retrieval with configurable fusion (`RAG_HYBRID_ALPHA`)
+- Weighted score fusion and Reciprocal Rank Fusion (RRF) are both supported
+- Cross-encoder reranking with BAAI/bge-reranker-v2-m3 (OpenVINO / ONNX / PyTorch backend, auto-fallback)
+- Metadata-aware boosting: keyword and topic fields from TextNode metadata are used to boost BM25 scoring and reranking
+- MD5-based deduplication on ingest: nodes already in Qdrant are skipped, making re-indexing fast
+
+**LLM serving**
+- Three backends: Google Gemini (cloud), Qwen3-8B-AWQ via vLLM on a Slurm GPU cluster (local), Groq API (cloud)
+- `llm_proxy` provides health-check, retry, and automatic Gemini fallback when vLLM is unavailable
+- Model selection via a single environment variable; switchable without rebuilding
+
+**Interfaces**
+- Streamlit web app with authentication, conversation history, pinning, archiving, and sharing
+- FastAPI service (`chatbot_api`) with streaming (SSE), debug, and reload endpoints
+- Embeddable JavaScript widget (`widget/`) for drop-in LMS integration
+
+---
+
+## Architecture
 
 ```
-User Question
-    ↓
-[Embedding] → BAAI/bge-m3
-    ↓
-┌───────────────────────────────────┐
-│         Hybrid Retrieval          │
-├───────────────────────────────────┤
-│ 1. Dense Search (Qdrant)          │ → Top-k semantic results
-│ 2. Lexical Search (BM25)          │ → Top-k keyword results
-└───────────────────────────────────┘
-    ↓
-[Fusion: Score-based or RRF]
-    ↓
-[Candidate Pool Sizing]
-    ↓
-[Cross-Encoder Reranking] → BAAI/bge-reranker-v2-m3
-    ↓
-Top-N final chunks for context
-    ↓
-[Prompt Building + Chat History]
-    ↓
-[LLM Generation (Gemini / Groq / vLLM)]
-    ↓
-Answer + Sources
+  TextNode JSON          TextNode JSON
+  (ASR pipeline)         (Vision pipeline)
+         │                      │
+         └──────────┬───────────┘
+                    │
+              data/*.json
+                    │
+         ┌──────────▼──────────────────┐
+         │     Ingest on startup        │
+         │  BGE-M3 embed + BM25 index  │
+         │  Qdrant upsert (MD5 dedup)  │
+         └──────────┬──────────────────┘
+                    │
+         ┌──────────▼──────────────────────────────┐
+         │              Query flow                  │
+         │                                          │
+         │  Question → BGE-M3 embed                 │
+         │    → Dense search  (Qdrant)              │
+         │    → Sparse search (BM25 + kw boost)     │
+         │    → Score fusion (alpha/RRF)            │
+         │    → BGE Reranker  (+ metadata boost)    │
+         │    → Top-N chunks → LLM → Answer         │
+         └──────────┬──────────────────────────────┘
+                    │
+       ┌────────────┴───────────────┐
+       ▼                            ▼
+  Streamlit :8501           FastAPI API :9100
+  (web UI)                  (REST + streaming + widget)
 ```
 
 ---
 
-## 🛠️ Tech Stack
-
-| Layer | Technology |
-|---|---|
-| **Frontend** | Streamlit 1.49 |
-| **Backend & API** | FastAPI, Uvicorn |
-| **LLM & RAG** | LangChain 0.2, Google Gemini, Groq, Qwen3 (vLLM) |
-| **Embedding & Reranking** | Sentence Transformers (`BAAI/bge-m3`, `BAAI/bge-reranker-v2-m3`) |
-| **Vector DB** | Qdrant |
-| **Database** | PostgreSQL 15 + SQLAlchemy ORM |
-| **PDF Parsing** | PyMuPDF + pymupdf4llm |
-| **Auth** | bcrypt |
-| **ML Backend** | PyTorch 2.8 (CPU) / OnnxRuntime / Openvino |
-| **DevOps** | Docker Compose |
-
----
-
-## 📁 Project Structure
+## Project Structure
 
 ```
-rag-pipeline/
-├── src/                        # Core application
-│   ├── app_v2.py               # Streamlit main app & UI
-│   ├── api_service.py          # FastAPI RAG service
-│   ├── config.py               # Configuration classes
-│   ├── processor.py            # RAG pipeline (ingest, embed, search, generate)
-│   ├── llm_manager.py          # LLM abstraction layer
-│   └── llm_proxy.py            # FastAPI proxy server (vLLM + Gemini fallback)
+.
+├── src/
+│   ├── app_v2.py               # Streamlit UI
+│   ├── api_service.py          # FastAPI RAG service (port 9100)
+│   ├── config.py               # All configuration dataclasses
+│   ├── processor.py            # Ingest, embed, hybrid search, rerank, generate
+│   ├── llm_manager.py          # LLM abstraction (Gemini / vLLM / Groq)
+│   └── llm_proxy.py            # FastAPI proxy with health-check & fallback (port 5000)
 ├── auth/
-│   └── authentication.py       # User auth service (signup, login, password hashing)
+│   └── authentication.py       # bcrypt-based sign-up / login
+├── components/ & frontend/     # Streamlit UI components and styles
 ├── database/
-│   ├── database.py             # SQLAlchemy session management
-│   └── models.py               # ORM models (User, Conversation, Message, ...)
+│   ├── database.py             # SQLAlchemy session
+│   └── models.py               # ORM: User, Conversation, Message, Settings, SharedConversation
 ├── services/
-│   └── conversation_service.py # Business logic for conversations & messages
-├── data/                       # Directory for document by subject
-│   ├── source_docs/
-│   └── processed_chunks/
-├── models/                     # Pre-downloaded models
+│   └── conversation_service.py # Conversation & message business logic
+├── extracting_pdf_pipeline/    # Vision pipeline (Qwen3-VL-8B + Google Drive crawler)
+│   ├── main.py                 # PDF → TextNode JSON via Qwen3-VL
+│   └── CrawlFileFromDrive.ipynb# Google Colab notebook: Drive → PDF normalisation
+├── widget/                     # Embeddable JS chat widget
+│   ├── chatbot-widget.js
+│   ├── loader.js
+│   └── README.md
+├── scripts/                    # Evaluation & benchmarking scripts
+│   ├── evaluate_rag_english.py # End-to-end RAG evaluation (nDCG, MRR, RAGAS)
+│   └── benchmark_*.py
 ├── docker/
-│   ├── docker-compose.yml      # Multi-service orchestration
-│   ├── Dockerfile              # Main app image
-│   └── Dockerfile.proxy        # LLM proxy image
-├── requirements.txt
-└── README.md
+│   ├── docker-compose.yml
+│   ├── Dockerfile
+│   └── Dockerfile.proxy
+├── .env.example
+└── requirements.txt
 ```
+
+*`data/`, `models/`, `vectordb/`, `evaluation/`, and `vpn_config/` are excluded from version control.*
 
 ---
 
-## 🚀 Installation & Usage
+## Getting Started
 
 ### Prerequisites
 
-- **Python** 3.11+
-- **Docker** & **Docker Compose** (recommended)
-- **Google API Key** (for Gemini fallback)
+- Python 3.11+
+- Docker & Docker Compose v2
+- A Google API key (Gemini — used as LLM fallback)
+- TextNode JSON files generated by the [ASR pipeline](https://github.com/VuThanhNhan2003/whisper-project) or the [Vision pipeline](./extracting_pdf_pipeline/)
 
-### 1. Clone & Install Dependencies
+### 1. Clone
 
 ```bash
-git clone <repository-url>
-cd rag-pipeline
-
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+git clone https://github.com/VuThanhNhan2003/ask-pdf-text-only--chatbot.git
+cd ask-pdf-text-only--chatbot
 ```
 
-### 2. Configure Environment
+### 2. Configure environment
 
-Create a `.env` file in the root directory:
+```bash
+cp .env.example .env
+```
+
+Key variables to set:
 
 ```env
-# Google Gemini API
-GOOGLE_API_KEY=your_google_api_key
+# Required
+GOOGLE_API_KEY=your_gemini_key
+GROQ_API_KEY=your_groq_key          # only needed for groq-qwen3-32b
 
-# Groq API
-GROQ_API_KEY=your_groq_api_key
-
-# PostgreSQL
-POSTGRES_PASSWORD=your_postgres_password
-
-# Qdrant
-QDRANT_URL=http://localhost:6333
-QDRANT_COLLECTION=documents
-
-# LLM Proxy
-LLM_PROXY_URL=http://localhost:5000
-LLM_MODEL=qwen3-8b          # or "gemini" or "groq"
-
-# LLM Parameters
+# LLM backend: gemini | qwen3-8b | groq-qwen3-32b
+LLM_MODEL=gemini
+LLM_PROXY_URL=http://llm_proxy:5000
 LLM_TEMPERATURE=0.7
-LLM_MAX_OUTPUT_TOKENS=2048
+LLM_PRESENCE_PENALTY=1.5
+
+# Hybrid retrieval
+RAG_EMBEDDING_MODEL=BAAI/bge-m3
+RAG_HYBRID_ALPHA=0.7                # weight for dense vs sparse
+RAG_RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+RAG_RERANK_BACKEND=openvino         # openvino | onnx | torch
+RAG_RERANK_TOP_N=8
+
+# Database
+POSTGRES_PASSWORD=chatbot_pass_2024
+QDRANT_URL=http://qdrant:6333
+QDRANT_COLLECTION=documents
 ```
 
-### 3. Launch with Docker (Recommended)
+### 3. Add TextNode JSON files
+
+Place the `.json` files produced by the ASR or Vision pipelines into `data/`:
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d
+mkdir -p data
+
+# From the ASR pipeline
+cp /path/to/whisper-project/file_textnodes/*.textnodes.json data/
+
+# From the Vision pipeline
+cp /path/to/extracting_pdf_pipeline/output/*.json data/
 ```
 
-Access the application at: **http://localhost:8501**
+The app indexes these automatically on startup. Only new or changed nodes are re-embedded (MD5 dedup).
 
-### 4. Add Documents
+### 4. Pre-download models (recommended)
 
-Place your documents into the `data/source_docs/` directory, organized by subject. The application supports PDF files and pre-chunked JSON files.
-
-**For PDF files:**
-```
-data/source_docs/
-├── Calculus 1/
-│   ├── chapter1.pdf
-│   └── chapter2.pdf
-├── Business Statistics/
-│   └── textbook.pdf
-└── Physics 2/
-    └── lecture_notes.pdf
+```bash
+mkdir -p models
+huggingface-cli download BAAI/bge-m3 --local-dir ./models/bge-m3
+huggingface-cli download BAAI/bge-reranker-v2-m3 --local-dir ./models/bge-reranker-v2-m3
 ```
 
-**For pre-chunked JSON files:**
-Place your JSON files in the `data/processed_chunks/` directory, following the same subject-based structure.
+### 5. Start
 
-The documents will be automatically ingested when the application starts.
+```bash
+docker compose -f docker/docker-compose.yml up -d --build
+```
+
+Access the UI at **http://localhost:8501**.
 
 ---
 
-## ⚙️ Detailed Configuration
+## Services
 
-Configuration classes are defined in `src/config.py`:
-
-| Class | Description | Key Parameters |
+| Service | Port | Description |
 |---|---|---|
-| `EmbeddingConfig` | Embedding model | `model_name`, `batch_size`, `local_path` |
-| `QdrantConfig` | Vector DB | `host`, `port` (6333), `collection_name` |
-| `ChunkingConfig` | Text chunking | `chunk_size` (1000), `chunk_overlap` (200) |
-| `LLMConfig` | LLM selection | `current_model`, `temperature`, `proxy_url` |
-| `RetrievalConfig` | RAG search | `top_k` (5), `score_threshold` (0.3) |
-| `AppConfig` | UI & paths | `data_folder`, `log_folder`, `page_title` |
+| `app` | 8501 | Streamlit web UI |
+| `chatbot_api` | 9100 | FastAPI RAG service (REST + SSE) |
+| `llm_proxy` | 5000 | LLM proxy (health-check, retry, Gemini fallback) |
+| `qdrant` | 6333 | Vector database |
+| `postgres` | 5432 | SQL database |
 
-### Supported LLM Models
+---
 
-The application supports multiple LLMs, configured in `src/config.py`. The `LLMManager` class handles the selection and instantiation of the appropriate LLM.
+## LLM Backends
 
-```python
-AVAILABLE_MODELS = {
-    "gemini": {
-        "type": "api",
-        "provider": "google",
-        "name": "gemini-2.5-flash"
-    },
-    "groq": {
-        "type": "groq",
-        "provider": "groq",
-        "name": "qwen/qwen3-32b"
-    },
-    "qwen3-8b": {
-        "type": "proxy",
-        "provider": "vllm",
-        "name": "Qwen/Qwen3-8B-AWQ"
-    }
-}
+| `LLM_MODEL` | Backend | Requires |
+|---|---|---|
+| `gemini` | Google Gemini 2.5 Flash | `GOOGLE_API_KEY` |
+| `qwen3-8b` | Qwen3-8B-AWQ via vLLM (Slurm cluster) | SSH tunnel on port 8001 |
+| `groq-qwen3-32b` | Qwen3-32B via Groq | `GROQ_API_KEY` |
+
+Switch without rebuilding:
+
+```bash
+sed -i 's/LLM_MODEL=.*/LLM_MODEL=gemini/' .env
+docker compose -f docker/docker-compose.yml up -d llm_proxy app
 ```
 
----
-
-## 🗄️ Database Schema
-
-The database schema is defined using SQLAlchemy ORM in `database/models.py`.
-
-- **users**: Stores user account information.
-- **user_settings**: Stores user preferences.
-- **conversations**: Stores chat sessions.
-- **messages**: Stores individual messages within a conversation.
-- **shared_conversations**: Stores information about publicly shared conversations.
+`llm_proxy` automatically falls back to Gemini when the vLLM endpoint is unreachable.
 
 ---
 
-## 🔌 API Endpoints (FastAPI Service - Port 9100)
-
-The `chatbot_api` service provides a set of endpoints to interact with the RAG pipeline.
+## API Reference (port 9100)
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/health` | GET | Health check |
-| `/models` | GET | List available LLM models |
-| `/subjects` | GET | List loaded subjects |
-| `/query` | POST | Answer a question (non-streaming) |
-| `/query/debug` | POST | Answer a question with retrieval debug information |
-| `/query/stream` | POST | Answer a question (streaming via Server-Sent Events) |
-| `/reload` | POST | Reload data into the vector store |
+| `/health` | GET | Service health |
+| `/subjects` | GET | List indexed subjects |
+| `/query` | POST | Non-streaming Q&A |
+| `/query/stream` | POST | Streaming Q&A (SSE) |
+| `/query/debug` | POST | Q&A with per-stage retrieval scores (dense, BM25, hybrid, rerank) |
+| `/reload` | POST | Re-index `data/` without restarting |
 
 ---
 
-## 🐳 Docker
+## Embeddable Widget
 
-The `docker-compose.yml` file orchestrates the different services of the application.
+A self-contained JavaScript widget for embedding the chatbot on any webpage:
 
-### Services
-
-- **postgres**: PostgreSQL database.
-- **qdrant**: Qdrant vector database.
-- **llm_proxy**: FastAPI proxy for vLLM with Gemini fallback.
-- **app**: Streamlit web UI.
-- **chatbot_api**: FastAPI RAG service.
-
-### Build & Deploy
-
-```bash
-# Build and run all services
-docker compose -f docker/docker-compose.yml up -d --build
-
-# View logs
-docker compose -f docker/docker-compose.yml logs -f app
-
-# Stop all services
-docker compose -f docker/docker-compose.yml down
+```html
+<script src="https://your-domain.com/widget/loader.js"
+        data-api-url="https://your-api-domain.com"
+        data-subject="Calculus 1"
+        data-position="bottom-right"
+        data-primary-color="#1f77b4">
+</script>
 ```
 
----
-
-## 📝 Logging
-
-- **File log**: `logs/rag_YYYYMMDD.log` (daily rotation)
-- **Console**: Displays WARNING level and above
-- **Format**: `Timestamp | Logger | Level | Message`
+See [`widget/README.md`](./widget/README.md) for the full list of configuration attributes.
 
 ---
 
-## 🛣️ Roadmap
+## Evaluation
 
-- [ ] Admin dashboard for user management
-- [ ] Support for more file formats (DOCX, PPTX)
-- [ ] Token-based authentication (JWT)
-- [ ] Multi-language support
-- [ ] Export conversation to PDF
-- [ ] Analytics & usage statistics
+Evaluation scripts are in `scripts/` (ground-truth files must be created separately):
+
+```bash
+# End-to-end retrieval + generation evaluation
+python scripts/evaluate_rag_english.py
+
+# Reranker backend benchmark
+python scripts/benchmark_reranker_backends.py
+
+# End-to-end latency benchmark
+python scripts/benchmark_end_to_end_latency.py
+```
+
+Metrics: nDCG@k, MRR, Precision@k, RAGAS (faithfulness, answer relevancy, context precision).
 
 ---
 
-## 📄 License
+## Database Schema
 
-This project is developed for educational purposes.
+```
+users ──► conversations ──► messages
+  │              └──► shared_conversations
+  └──► user_settings
+```
+
+Key fields: `conversations.subject` (course name), `messages.sources` (JSON array of retrieved chunks), `messages.processing_time`.
+
+---
+
+## License
+
+Developed for academic purposes — Undergraduate Thesis, International University VNU-HCM, 2026.
