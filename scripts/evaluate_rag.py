@@ -3,10 +3,13 @@
 End-to-end RAG evaluation runner with ablation study support.
 
 Ablation modes:
-  dense_only          – dense retrieval only (no BM25, no rerank)
-  hybrid_no_rerank    – dense + BM25, no reranking
-  dense_with_rerank   – dense + reranker, no BM25
-  full                – hybrid (dense + BM25) + reranker  [default]
+  dense_only            - dense retrieval only (no BM25, no rerank)
+  hybrid_no_rerank       - dense + BM25, no reranking
+  dense_with_rerank      - dense + reranker, no BM25
+  full                   - hybrid (dense + BM25) + reranker  [default]
+  full_no_bm25_boost     - full pipeline, BM25 keyword/topic boost DISABLED, rerank boost kept
+  full_no_rerank_boost   - full pipeline, rerank keyword/topic boost DISABLED, BM25 boost kept
+  full_no_metadata       - full pipeline, ALL metadata boosts DISABLED (BM25 + rerank)
 
 Usage examples:
   # Run only the full pipeline (original behaviour)
@@ -76,7 +79,7 @@ DEFAULT_CHUNKS_PATH = (
     / "Môn Triết học Mác-Lênin"
     / "19filespdftriếthọcm-ln112024_19filespdftriếthọcm-ln112024.json"
 )
-SCRIPT_VERSION = "eval-rag-2026-04-15-v3"
+SCRIPT_VERSION = "eval-rag-2026-07-05-v4-boost-split"
 
 # Weight sweep presets for score fusion (dense vs BM25).
 WEIGHT_SWEEP_PRESETS = [
@@ -98,7 +101,12 @@ class AblationConfig:
     use_dense: bool = True
     use_bm25: bool = True
     use_rerank: bool = True
-    disable_metadata_boosts: bool = False
+    # [SPLIT] metadata boosts are now toggled independently per layer instead
+    # of a single all-or-nothing flag, so we can isolate which layer (BM25
+    # lexical boosting vs. cross-encoder rerank boosting) drives any change
+    # in retrieval quality.
+    disable_bm25_boost: bool = False
+    disable_rerank_boost: bool = False
     description: str = ""
 
     def __post_init__(self):
@@ -111,6 +119,18 @@ class AblationConfig:
             if self.use_rerank:
                 parts.append("rerank")
             self.description = " + ".join(parts) if parts else "none"
+
+    @property
+    def disable_metadata_boosts(self) -> bool:
+        """Back-compat convenience: True only when BOTH boost layers are off."""
+        return self.disable_bm25_boost and self.disable_rerank_boost
+
+    @property
+    def boost_label(self) -> str:
+        """Human-readable summary of which boost layers are active, e.g. 'bm25:off,rerank:on'."""
+        bm25_state   = "off" if self.disable_bm25_boost   else "on"
+        rerank_state = "off" if self.disable_rerank_boost else "on"
+        return f"bm25:{bm25_state},rerank:{rerank_state}"
 
 
 # All supported ablation modes.
@@ -139,12 +159,31 @@ ABLATION_MODES: Dict[str, AblationConfig] = {
         use_bm25=True,
         use_rerank=True,
     ),
+    # [SPLIT] isolate BM25 lexical boost only
+    "full_no_bm25_boost": AblationConfig(
+        name="full_no_bm25_boost",
+        use_dense=True,
+        use_bm25=True,
+        use_rerank=True,
+        disable_bm25_boost=True,
+        disable_rerank_boost=False,
+    ),
+    # [SPLIT] isolate rerank additive boost only
+    "full_no_rerank_boost": AblationConfig(
+        name="full_no_rerank_boost",
+        use_dense=True,
+        use_bm25=True,
+        use_rerank=True,
+        disable_bm25_boost=False,
+        disable_rerank_boost=True,
+    ),
     "full_no_metadata": AblationConfig(
         name="full_no_metadata",
         use_dense=True,
         use_bm25=True,
         use_rerank=True,
-        disable_metadata_boosts=True,
+        disable_bm25_boost=True,
+        disable_rerank_boost=True,
     ),
 }
 
@@ -177,10 +216,10 @@ def retrieve_with_config(
     This wraps processor's lower-level retrieval primitives so we can test
     every combination without touching processor.py.
 
-      use_dense + use_bm25  → hybrid_retrieve()  (score or RRF fusion)
-      use_dense only        → retrieve_dense()
-      use_bm25  only        → retrieve_bm25()
-      use_rerank            → rerank() on top of whichever candidates we got
+      use_dense + use_bm25  -> hybrid_retrieve()  (score or RRF fusion)
+      use_dense only        -> retrieve_dense()
+      use_bm25  only        -> retrieve_bm25()
+      use_rerank            -> rerank() on top of whichever candidates we got
     """
     # ── candidate generation ──────────────────────────────────────────────────
     multiplier   = max(1, RERANK_CANDIDATE_MULTIPLIER)
@@ -208,24 +247,41 @@ def retrieve_with_config(
 
 def _apply_metadata_boosts(
     processor: RAGProcessor,
-    enable: bool,
+    enable_bm25_boost: bool,
+    enable_rerank_boost: bool,
     baseline: Dict[str, float],
 ) -> None:
-    """Toggle metadata boosts (BM25 + rerank) and rebuild BM25 index if needed."""
-    if enable:
+    """
+    Toggle BM25 and rerank metadata boosts INDEPENDENTLY and rebuild the BM25
+    index if needed.
+
+    [SPLIT] Previously this took a single `enable` flag that toggled all four
+    boost constants together (BM25_KEYWORD_BOOST, BM25_TOPIC_BOOST,
+    RERANK_KEYWORD_BOOST_PER_MATCH, RERANK_TOPIC_BOOST). That made it
+    impossible to tell whether a quality change came from the BM25 lexical
+    boost (which affects candidate *selection* into the hybrid pool) or the
+    rerank additive boost (which affects final *ranking* of already-selected
+    candidates). Now each layer has its own on/off switch.
+    """
+    if enable_bm25_boost:
         processor_module.BM25_KEYWORD_BOOST = int(baseline["BM25_KEYWORD_BOOST"])
         processor_module.BM25_TOPIC_BOOST = int(baseline["BM25_TOPIC_BOOST"])
+    else:
+        processor_module.BM25_KEYWORD_BOOST = 0
+        processor_module.BM25_TOPIC_BOOST = 0
+
+    if enable_rerank_boost:
         processor_module.RERANK_KEYWORD_BOOST_PER_MATCH = float(
             baseline["RERANK_KEYWORD_BOOST_PER_MATCH"]
         )
         processor_module.RERANK_TOPIC_BOOST = float(baseline["RERANK_TOPIC_BOOST"])
     else:
-        processor_module.BM25_KEYWORD_BOOST = 0
-        processor_module.BM25_TOPIC_BOOST = 0
         processor_module.RERANK_KEYWORD_BOOST_PER_MATCH = 0.0
         processor_module.RERANK_TOPIC_BOOST = 0.0
 
-    # BM25 index depends on boost values; rebuild to keep scores consistent.
+    # BM25 index token repetition depends on BM25_KEYWORD_BOOST/BM25_TOPIC_BOOST;
+    # always rebuild so the in-memory index reflects the current setting,
+    # regardless of which layer changed.
     processor._build_bm25_index_from_qdrant()
 
 
@@ -239,7 +295,7 @@ def _apply_score_fusion_weights(alpha: float, beta: float, baseline_mode: str) -
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DATA STRUCTURES  (unchanged from v2)
+# DATA STRUCTURES  (unchanged from v3)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -266,7 +322,7 @@ class EvalQuery:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HELPERS  (unchanged from v2)
+# HELPERS  (unchanged from v3)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _safe_text(value: Any) -> str:
@@ -530,7 +586,7 @@ def load_eval_queries_from_file(path: Path, max_queries: int) -> List[EvalQuery]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# METRICS  (unchanged from v2)
+# METRICS  (unchanged from v3)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def precision_at_k(retrieved: List[str], relevant: set) -> float:
@@ -698,7 +754,7 @@ def _diagnose_row(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PROMPT / GENERATION HELPERS  (unchanged from v2)
+# PROMPT / GENERATION HELPERS  (unchanged from v3)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _needs_synthesis(text: str) -> bool:
@@ -856,7 +912,7 @@ Trả lời (văn xuôi):"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RAGAS  (unchanged from v2)
+# RAGAS  (unchanged from v3)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_ragas_evaluation(
@@ -982,14 +1038,14 @@ def evaluate_queries(
     generation_context_k: int,
     concise_mode: bool,
     answer_compaction: bool,
-    ablation_cfg: AblationConfig,                  # ← NEW
+    ablation_cfg: AblationConfig,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Evaluate a list of queries under a given ablation configuration.
 
-    The only change vs v2: retrieval is delegated to ``retrieve_with_config()``
-    instead of calling ``processor._retrieve_relevant_chunks()`` directly.
-    Everything else (metrics, generation, RAGAS) is identical.
+    Retrieval is delegated to ``retrieve_with_config()`` instead of calling
+    ``processor._retrieve_relevant_chunks()`` directly. Everything else
+    (metrics, generation, RAGAS) is identical to v3.
     """
     rows: List[Dict[str, Any]] = []
     ragas_samples: List[Dict[str, Any]] = []
@@ -1066,8 +1122,13 @@ def evaluate_queries(
             "query_index":              idx,
             "query_id":                 item.query_id,
             "query":                    item.query,
-            "ablation_mode":            ablation_cfg.name,          # ← NEW
-            "metadata_boosts":          "off" if ablation_cfg.disable_metadata_boosts else "on",
+            "ablation_mode":            ablation_cfg.name,
+            # [SPLIT] report both boost layers independently instead of a
+            # single on/off flag, so per-query CSVs can be filtered/grouped
+            # by which layer was active.
+            "bm25_boost":               "off" if ablation_cfg.disable_bm25_boost else "on",
+            "rerank_boost":             "off" if ablation_cfg.disable_rerank_boost else "on",
+            "metadata_boosts":          ablation_cfg.boost_label,
             "hybrid_mode":              processor_module.HYBRID_MODE,
             "hybrid_alpha":             processor_module.HYBRID_ALPHA,
             "hybrid_beta":              processor_module.HYBRID_BETA,
@@ -1171,7 +1232,9 @@ def evaluate_queries(
     summary: Dict[str, Any] = {
         "ablation_mode":  ablation_cfg.name,
         "description":    ablation_cfg.description,
-        "metadata_boosts": "off" if ablation_cfg.disable_metadata_boosts else "on",
+        "bm25_boost":     "off" if ablation_cfg.disable_bm25_boost else "on",
+        "rerank_boost":   "off" if ablation_cfg.disable_rerank_boost else "on",
+        "metadata_boosts": ablation_cfg.boost_label,
         "hybrid_mode":     processor_module.HYBRID_MODE,
         "hybrid_alpha":    processor_module.HYBRID_ALPHA,
         "hybrid_beta":     processor_module.HYBRID_BETA,
@@ -1221,8 +1284,8 @@ def run_ablation_study(
     Run evaluation for each requested ablation mode and collect results.
 
     Returns:
-        dfs     – dict[mode_name → per-query DataFrame]
-        results – dict[mode_name → summary dict]  (also serialisable as JSON)
+        dfs     - dict[mode_name -> per-query DataFrame]
+        results - dict[mode_name -> summary dict]  (also serialisable as JSON)
     """
     dfs:     Dict[str, pd.DataFrame] = {}
     results: Dict[str, Any]           = {}
@@ -1237,12 +1300,14 @@ def run_ablation_study(
     for mode_name in modes:
         cfg = ABLATION_MODES[mode_name]
         print(f"\n{'='*80}")
-        print(f"  Ablation mode: {mode_name.upper()}  ({cfg.description})")
+        print(f"  Ablation mode: {mode_name.upper()}  ({cfg.description}, boosts={cfg.boost_label})")
         print(f"{'='*80}")
 
+        # [SPLIT] pass both boost layers independently
         _apply_metadata_boosts(
             processor,
-            enable=not cfg.disable_metadata_boosts,
+            enable_bm25_boost=not cfg.disable_bm25_boost,
+            enable_rerank_boost=not cfg.disable_rerank_boost,
             baseline=baseline_boosts,
         )
 
@@ -1363,6 +1428,14 @@ def print_comparison_table(results: Dict[str, Any]) -> None:
         print(" | ".join(cells))
 
     print(sep)
+
+    # [SPLIT] extra footer line clarifying which boost layer was active per mode,
+    # since some mode names (full_no_bm25_boost / full_no_rerank_boost) are new
+    # and easy to mix up when scanning the table quickly.
+    print("\nBoost layers per config:")
+    for mode_name in mode_names:
+        boost_label = results[mode_name].get("metadata_boosts", "n/a")
+        print(f"  - {mode_name:<{name_width}}: {boost_label}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
